@@ -1,0 +1,1 @@
+# AMR screening module
