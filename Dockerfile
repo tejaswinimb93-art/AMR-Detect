@@ -6,6 +6,8 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app ./app
+COPY app/ .
 
-CMD ["python", "app/app.py"]
+EXPOSE 7860
+
+CMD ["python", "app.py"]
