@@ -1,3 +1,4 @@
+import os
 import gradio as gr
 
 def check_status():
@@ -11,4 +12,9 @@ demo = gr.Interface(
     description="Antimicrobial Resistance Detection and Analysis"
 )
 
-demo.launch()
+port = int(os.environ.get("PORT", "10000"))
+
+demo.launch(
+    server_name="0.0.0.0",
+    server_port=port
+)
