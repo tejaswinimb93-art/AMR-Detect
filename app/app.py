@@ -1,4 +1,5 @@
 import os
+import subprocess
 import gradio as gr
 from Bio import SeqIO
 
@@ -14,6 +15,7 @@ def analyze_sample(organism, sample_id, fasta_file):
         organism = "Not specified"
 
     try:
+        # Read FASTA
         records = list(SeqIO.parse(fasta_file, "fasta"))
 
         if not records:
@@ -24,10 +26,7 @@ def analyze_sample(organism, sample_id, fasta_file):
         valid_bases = set("ACGTN")
 
         if any(base not in valid_bases for base in sequence):
-            return (
-                "Error: The FASTA sequence contains invalid characters. "
-                "Please upload a DNA sequence containing A, C, G, T or N."
-            )
+            return "Error: FASTA contains invalid DNA characters."
 
         length = len(sequence)
 
@@ -37,20 +36,43 @@ def analyze_sample(organism, sample_id, fasta_file):
         t_count = sequence.count("T")
         n_count = sequence.count("N")
 
-        gc_count = g_count + c_count
-        gc_content = (gc_count / length * 100) if length > 0 else 0
+        gc_content = (
+            ((g_count + c_count) / length) * 100
+            if length > 0 else 0
+        )
+
+        # Run AMRFinderPlus
+        result = subprocess.run(
+            ["amrfinder", "-n", fasta_file],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            amr_result = (
+                "AMRFinderPlus could not complete the analysis.\n\n"
+                + result.stderr
+            )
+        else:
+            amr_result = result.stdout.strip()
+
+            if not amr_result:
+                amr_result = "No AMR determinants were reported by AMRFinderPlus."
 
         filename = os.path.basename(fasta_file)
 
-        return f"""AMR-Detect Sequence Analysis
+        return f"""AMR-Detect Analysis
 
 Sample ID: {sample_id}
 Organism: {organism}
 FASTA file: {filename}
 
+━━━━━━━━━━━━━━━━━━━━━━
+SEQUENCE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━
+
 Sequence length: {length:,} bp
 
-Base composition:
 A: {a_count:,}
 C: {c_count:,}
 G: {g_count:,}
@@ -59,16 +81,15 @@ N: {n_count:,}
 
 GC content: {gc_content:.2f}%
 
-Status:
-FASTA sequence successfully received and analysed.
+━━━━━━━━━━━━━━━━━━━━━━
+AMRFINDERPLUS RESULT
+━━━━━━━━━━━━━━━━━━━━━━
 
-Next stage:
-AMR detection engine will analyse the sequence for antimicrobial
-resistance determinants.
+{amr_result}
+
+━━━━━━━━━━━━━━━━━━━━━━
+Analysis completed.
 """
-
-    except Exception as e:
-        return f"Error while reading FASTA file: {str(e)}"
 
 
 demo = gr.Interface(
@@ -92,9 +113,7 @@ demo = gr.Interface(
         label="AMR-Detect Result"
     ),
     title="AMR-Detect",
-    description=(
-        "Antimicrobial Resistance Detection and Analysis"
-    ),
+    description="Antimicrobial Resistance Detection and Analysis",
     flagging_mode="never"
 )
 
