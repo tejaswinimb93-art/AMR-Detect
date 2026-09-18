@@ -1,12 +1,21 @@
-FROM python:3.11-slim
+FROM mambaorg/micromamba:latest
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY --chown=$MAMBA_USER:$MAMBA_USER requirements.txt .
+
+RUN micromamba install -y -n base \
+    -c conda-forge \
+    -c bioconda \
+    python=3.11 \
+    ncbi-amrfinderplus \
+    && micromamba clean --all --yes
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ .
+RUN amrfinder -u
+
+COPY --chown=$MAMBA_USER:$MAMBA_USER app/ .
 
 EXPOSE 7860
 
