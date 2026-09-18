@@ -2,13 +2,14 @@ import os
 import zipfile
 import tempfile
 import shutil
+import subprocess
+
 import pandas as pd
 import gradio as gr
-import subprocess
 
 
 # ============================================================
-# ORGANISM / AMRFINDER MAPPING
+# ORGANISM / AMRFINDERPLUS MAPPING
 # ============================================================
 
 ORGANISM_MAP = {
@@ -25,30 +26,31 @@ ORGANISM_MAP = {
     "salmonella spp.": "Salmonella",
     "haemophilus influenzae": "Haemophilus_influenzae",
     "neisseria gonorrhoeae": "Neisseria_gonorrhoeae",
+    "streptococcus agalactiae": "Streptococcus_agalactiae",
     "streptococcus pneumoniae": "Streptococcus_pneumoniae",
     "streptococcus pyogenes": "Streptococcus_pyogenes",
     "campylobacter": "Campylobacter",
     "serratia marcescens": "Serratia_marcescens",
+    "vibrio cholerae": "Vibrio_cholerae",
+    "vibrio parahaemolyticus": "Vibrio_parahaemolyticus",
+    "vibrio vulnificus": "Vibrio_vulnificus",
 }
 
 
 # ============================================================
-# FASTA READING
+# FASTA READER
 # ============================================================
 
 def read_fasta(filepath):
     """
-    Read a FASTA file.
-
-    Returns:
-        header
-        nucleotide sequence
+    Read the first FASTA header and all nucleotide sequence lines.
     """
 
     header = ""
     sequence_parts = []
 
     with open(filepath, "r", encoding="utf-8") as file:
+
         for line in file:
 
             line = line.strip()
@@ -70,18 +72,28 @@ def read_fasta(filepath):
 
 
 # ============================================================
-# ORGANISM DETECTION FROM FASTA METADATA
+# ORGANISM INFORMATION
 # ============================================================
 
 def detect_organism(header, filename):
 
     text = f"{header} {filename}".lower()
 
-    for organism_name, amrfinder_name in ORGANISM_MAP.items():
+    # Longest names first to avoid partial matching problems.
+    sorted_names = sorted(
+        ORGANISM_MAP.keys(),
+        key=len,
+        reverse=True
+    )
+
+    for organism_name in sorted_names:
 
         if organism_name in text:
 
-            return organism_name.title(), amrfinder_name
+            return (
+                organism_name.title(),
+                ORGANISM_MAP[organism_name]
+            )
 
     return (
         "Organism identification pending",
@@ -97,21 +109,24 @@ def calculate_statistics(sequence):
 
     allowed = set("ACGTN")
 
+    # Remove whitespace and keep only valid nucleotide symbols.
     sequence = "".join(
-        base for base in sequence
+        base
+        for base in sequence.upper()
         if base in allowed
     )
 
-    length = len(sequence)
+    if not sequence:
 
-    if length == 0:
         raise ValueError(
             "No valid nucleotide sequence was found."
         )
 
+    length = len(sequence)
+
     a_count = sequence.count("A")
-    c_count = sequence.count("C")
     g_count = sequence.count("G")
+    c_count = sequence.count("C")
     t_count = sequence.count("T")
     n_count = sequence.count("N")
 
@@ -135,7 +150,10 @@ def calculate_statistics(sequence):
 # AMRFINDERPLUS
 # ============================================================
 
-def run_amrfinder(fasta_file, amrfinder_organism=None):
+def run_amrfinder(
+    fasta_file,
+    amrfinder_organism=None
+):
 
     command = [
         "amrfinder",
@@ -143,7 +161,7 @@ def run_amrfinder(fasta_file, amrfinder_organism=None):
         fasta_file
     ]
 
-    # Only use -O when we have a supported organism.
+    # Only provide -O when we have a supported organism.
     if amrfinder_organism:
 
         command.extend([
@@ -165,7 +183,9 @@ def run_amrfinder(fasta_file, amrfinder_organism=None):
             error_message = result.stderr.strip()
 
             if not error_message:
-                error_message = "Unknown AMRFinderPlus error."
+                error_message = (
+                    "Unknown AMRFinderPlus error."
+                )
 
             return (
                 False,
@@ -214,14 +234,20 @@ def run_amrfinder(fasta_file, amrfinder_organism=None):
 # AMR INTERPRETATION
 # ============================================================
 
-def interpret_amr(success, amr_result):
+def interpret_amr(
+    success,
+    amr_result
+):
 
     if not success:
 
         return (
             "AMR analysis could not be completed",
+
             "Susceptibility cannot be inferred because "
-            "the genomic AMR analysis did not complete."
+            "the genomic AMR analysis did not complete. "
+            "Please review the analysis error and use "
+            "validated phenotypic AST for clinical confirmation."
         )
 
     if amr_result.startswith(
@@ -230,6 +256,7 @@ def interpret_amr(success, amr_result):
 
         return (
             "No known AMR determinant detected",
+
             "No known genomic AMR determinant was detected "
             "by this screening. This does not prove "
             "susceptibility. Phenotypic AST is required."
@@ -237,6 +264,7 @@ def interpret_amr(success, amr_result):
 
     return (
         "AMR determinant(s) detected",
+
         "Detected genomic determinants may be associated "
         "with antimicrobial resistance. Absence of a "
         "detected resistance determinant does not prove "
@@ -251,24 +279,29 @@ def interpret_amr(success, amr_result):
 
 def analyse_single(fasta_file):
 
+    # Exactly 15 outputs are returned by this function.
+    empty_outputs = (
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+    )
+
     if not fasta_file:
 
         return (
             "Please upload a FASTA file.",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            ""
+            *empty_outputs
         )
 
     try:
@@ -307,11 +340,15 @@ def analyse_single(fasta_file):
             amr_result
         )
 
-        sample_id = (
-            header.split()[0]
-            if header
-            else os.path.splitext(filename)[0]
-        )
+        if header:
+
+            sample_id = header.split()[0]
+
+        else:
+
+            sample_id = os.path.splitext(
+                filename
+            )[0]
 
         return (
             "Sample analysed successfully.",
@@ -353,10 +390,13 @@ def analyse_single(fasta_file):
 
 
 # ============================================================
-# SAFE ZIP EXTRACTION
+# ZIP EXTRACTION
 # ============================================================
 
-def extract_fasta_files(zip_path, extraction_folder):
+def extract_fasta_files(
+    zip_path,
+    extraction_folder
+):
 
     fasta_extensions = (
         ".fa",
@@ -373,15 +413,18 @@ def extract_fasta_files(zip_path, extraction_folder):
 
         for member in archive.infolist():
 
-            # Ignore directories
             if member.is_dir():
                 continue
 
+            original_name = member.filename
+
             filename = os.path.basename(
-                member.filename
+                original_name
             )
 
-            # Ignore hidden/system files
+            if not filename:
+                continue
+
             if filename.startswith("."):
                 continue
 
@@ -390,17 +433,16 @@ def extract_fasta_files(zip_path, extraction_folder):
             ):
                 continue
 
-            # Prevent unsafe ZIP path traversal
-            safe_name = os.path.basename(
-                filename
-            )
+            # Use basename only.
+            # This prevents ZIP path traversal.
+            safe_name = filename
 
             destination = os.path.join(
                 extraction_folder,
                 safe_name
             )
 
-            # Avoid duplicate filenames
+            # Handle duplicate filenames.
             base, extension = os.path.splitext(
                 safe_name
             )
@@ -420,7 +462,9 @@ def extract_fasta_files(zip_path, extraction_folder):
 
                 counter += 1
 
-            with archive.open(member) as source:
+            with archive.open(
+                member
+            ) as source:
 
                 with open(
                     destination,
@@ -473,18 +517,19 @@ def analyse_zip(zip_file):
         zip_path = zip_file
 
         # ----------------------------------------------------
-        # Verify ZIP
+        # CHECK ZIP
         # ----------------------------------------------------
 
-        if not zipfile.is_zipfile(zip_path):
+        if not zipfile.is_zipfile(
+            zip_path
+        ):
 
             return pd.DataFrame(
                 [{
                     "Sample ID": "ERROR",
                     "Detected organism": "N/A",
-                    "FASTA file": os.path.basename(
-                        zip_path
-                    ),
+                    "FASTA file":
+                        os.path.basename(zip_path),
                     "Sequence length": "N/A",
                     "GC content": "N/A",
                     "AMR status": "Invalid ZIP",
@@ -497,7 +542,7 @@ def analyse_zip(zip_file):
             )
 
         # ----------------------------------------------------
-        # Extract all FASTA files
+        # EXTRACT EVERY FASTA FILE
         # ----------------------------------------------------
 
         fasta_files = extract_fasta_files(
@@ -506,7 +551,7 @@ def analyse_zip(zip_file):
         )
 
         # ----------------------------------------------------
-        # No FASTA files
+        # CHECK WHETHER FASTA FILES EXIST
         # ----------------------------------------------------
 
         if not fasta_files:
@@ -515,14 +560,17 @@ def analyse_zip(zip_file):
                 [{
                     "Sample ID": "ERROR",
                     "Detected organism": "N/A",
-                    "FASTA file": "No FASTA files found",
+                    "FASTA file":
+                        "No FASTA files found",
                     "Sequence length": "N/A",
                     "GC content": "N/A",
                     "AMR status": "No FASTA files",
                     "AMRFinderPlus result":
-                        "No .fa, .fasta or .fna files were found inside the ZIP.",
+                        "No .fa, .fasta or .fna files "
+                        "were found inside the ZIP.",
                     "Interpretation":
-                        "Upload a ZIP containing one or more FASTA files."
+                        "Upload a ZIP containing one or "
+                        "more FASTA files."
                 }],
                 columns=columns
             )
@@ -530,7 +578,7 @@ def analyse_zip(zip_file):
         results = []
 
         # ----------------------------------------------------
-        # Analyse EVERY FASTA file
+        # ANALYSE EVERY FASTA FILE
         # ----------------------------------------------------
 
         for index, fasta_path in enumerate(
@@ -553,18 +601,25 @@ def analyse_zip(zip_file):
                     results.append({
                         "Sample ID":
                             f"AMR-BATCH-{index:03d}",
+
                         "Detected organism":
                             "Unknown",
+
                         "FASTA file":
                             filename,
+
                         "Sequence length":
                             "0",
+
                         "GC content":
                             "N/A",
+
                         "AMR status":
                             "Invalid FASTA",
+
                         "AMRFinderPlus result":
                             "No nucleotide sequence found.",
+
                         "Interpretation":
                             "Analysis could not be performed."
                     })
@@ -590,29 +645,39 @@ def analyse_zip(zip_file):
                     amr_result
                 )
 
-                sample_id = (
-                    header.split()[0]
-                    if header
-                    else os.path.splitext(
+                if header:
+
+                    sample_id = header.split()[0]
+
+                else:
+
+                    sample_id = os.path.splitext(
                         filename
                     )[0]
-                )
 
                 results.append({
+
                     "Sample ID":
                         sample_id,
+
                     "Detected organism":
                         organism,
+
                     "FASTA file":
                         filename,
+
                     "Sequence length":
                         stats["length"],
+
                     "GC content":
                         f'{stats["GC"]:.2f}%',
+
                     "AMR status":
                         status,
+
                     "AMRFinderPlus result":
                         amr_result,
+
                     "Interpretation":
                         interpretation
                 })
@@ -620,20 +685,28 @@ def analyse_zip(zip_file):
             except Exception as error:
 
                 results.append({
+
                     "Sample ID":
                         f"AMR-BATCH-{index:03d}",
+
                     "Detected organism":
                         "Unknown",
+
                     "FASTA file":
                         filename,
+
                     "Sequence length":
                         "Error",
+
                     "GC content":
                         "Error",
+
                     "AMR status":
                         "Analysis failed",
+
                     "AMRFinderPlus result":
                         str(error),
+
                     "Interpretation":
                         "Analysis could not be completed."
                 })
@@ -652,7 +725,8 @@ def analyse_zip(zip_file):
                 "FASTA file": "ZIP processing",
                 "Sequence length": "N/A",
                 "GC content": "N/A",
-                "AMR status": "Batch analysis failed",
+                "AMR status":
+                    "Batch analysis failed",
                 "AMRFinderPlus result":
                     str(error),
                 "Interpretation":
@@ -670,7 +744,7 @@ def analyse_zip(zip_file):
 
 
 # ============================================================
-# USER INTERFACE
+# WEBSITE
 # ============================================================
 
 with gr.Blocks(
@@ -688,7 +762,7 @@ with gr.Blocks(
     )
 
     # ========================================================
-    # SINGLE SAMPLE
+    # SINGLE SAMPLE TAB
     # ========================================================
 
     with gr.Tab("Single Sample"):
@@ -697,7 +771,7 @@ with gr.Blocks(
             """
             ### 🧬 Single Sample Analysis
 
-            Upload one FASTA sequence for genomic analysis.
+            Upload one FASTA sequence for analysis.
             """
         )
 
@@ -808,7 +882,110 @@ with gr.Blocks(
         )
 
     # ========================================================
-    # MULTIPLE SAMPLE ZIP
+    # MULTIPLE SAMPLE TAB
     # ========================================================
 
     with gr.Tab("Multiple Samples"):
+
+        gr.Markdown(
+            """
+            ### 🔬 Multiple Sample Analysis
+
+            Upload *one ZIP file* containing any number
+            of FASTA files.
+
+            Supported FASTA formats:
+
+            .fa • .fasta • .fna
+
+            You do not need to select the FASTA files
+            individually. AMR-Detect automatically finds
+            every supported FASTA file inside the ZIP.
+            """
+        )
+
+        multiple_zip = gr.File(
+            label="📦 Upload ZIP containing FASTA files",
+            file_types=[
+                ".zip"
+            ],
+            type="filepath"
+        )
+
+        multiple_button = gr.Button(
+            "🔬 Analyse All Samples",
+            variant="primary"
+        )
+
+        multiple_results = gr.Dataframe(
+            headers=[
+                "Sample ID",
+                "Detected organism",
+                "FASTA file",
+                "Sequence length",
+                "GC content",
+                "AMR status",
+                "AMRFinderPlus result",
+                "Interpretation"
+            ],
+            datatype=[
+                "str",
+                "str",
+                "str",
+                "number",
+                "str",
+                "str",
+                "str",
+                "str"
+            ],
+            label="Multiple Sample AMR Results",
+            interactive=False,
+            wrap=True
+        )
+
+        multiple_button.click(
+            fn=analyse_zip,
+            inputs=multiple_zip,
+            outputs=multiple_results
+        )
+
+    # ========================================================
+    # PROFESSIONAL REVIEW
+    # ========================================================
+
+    gr.Markdown(
+        """
+        ---
+
+        ### 🩺 Professional Review
+
+        AMR-Detect provides genomic screening and
+        research-support information.
+
+        Genomic AMR findings do not independently confirm
+        clinical antimicrobial susceptibility or determine
+        treatment.
+
+        Phenotypic antimicrobial susceptibility testing (AST),
+        clinical context and qualified healthcare-professional
+        interpretation are required for clinical decisions.
+        """
+    )
+
+
+# ============================================================
+# SERVER
+# ============================================================
+
+port = int(
+    os.environ.get(
+        "PORT",
+        "7860"
+    )
+)
+
+demo.launch(
+    server_name="0.0.0.0",
+    server_port=port
+)
+               
