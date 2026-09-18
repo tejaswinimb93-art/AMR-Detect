@@ -1,48 +1,82 @@
 import os
 import gradio as gr
-
-
-organisms = [
-    "Escherichia coli",
-    "Klebsiella pneumoniae",
-    "Staphylococcus aureus",
-    "Pseudomonas aeruginosa",
-    "Acinetobacter baumannii",
-    "Enterococcus faecalis",
-    "Salmonella spp.",
-    "Other / Not listed"
-]
+from Bio import SeqIO
 
 
 def analyze_sample(organism, sample_id, fasta_file):
-    if not organism:
-        return "Please select an organism."
-
     if not fasta_file:
         return "Please upload a FASTA file."
 
     if not sample_id:
         sample_id = "Not provided"
 
-    filename = os.path.basename(fasta_file)
+    if not organism:
+        organism = "Not specified"
 
-    return f"""Sample received successfully.
+    try:
+        records = list(SeqIO.parse(fasta_file, "fasta"))
+
+        if not records:
+            return "Error: The FASTA file does not contain a valid sequence."
+
+        sequence = "".join(str(record.seq).upper() for record in records)
+
+        valid_bases = set("ACGTN")
+
+        if any(base not in valid_bases for base in sequence):
+            return (
+                "Error: The FASTA sequence contains invalid characters. "
+                "Please upload a DNA sequence containing A, C, G, T or N."
+            )
+
+        length = len(sequence)
+
+        a_count = sequence.count("A")
+        c_count = sequence.count("C")
+        g_count = sequence.count("G")
+        t_count = sequence.count("T")
+        n_count = sequence.count("N")
+
+        gc_count = g_count + c_count
+        gc_content = (gc_count / length * 100) if length > 0 else 0
+
+        filename = os.path.basename(fasta_file)
+
+        return f"""AMR-Detect Sequence Analysis
 
 Sample ID: {sample_id}
 Organism: {organism}
 FASTA file: {filename}
 
-AMR analysis engine will be connected in the next step.
+Sequence length: {length:,} bp
+
+Base composition:
+A: {a_count:,}
+C: {c_count:,}
+G: {g_count:,}
+T: {t_count:,}
+N: {n_count:,}
+
+GC content: {gc_content:.2f}%
+
+Status:
+FASTA sequence successfully received and analysed.
+
+Next stage:
+AMR detection engine will analyse the sequence for antimicrobial
+resistance determinants.
 """
+
+    except Exception as e:
+        return f"Error while reading FASTA file: {str(e)}"
 
 
 demo = gr.Interface(
     fn=analyze_sample,
     inputs=[
-        gr.Dropdown(
-            choices=organisms,
-            label="Select organism",
-            info="Choose the organism associated with the sample."
+        gr.Textbox(
+            label="Organism",
+            placeholder="Example: Escherichia coli (leave blank if unknown)"
         ),
         gr.Textbox(
             label="Sample ID",
@@ -58,7 +92,9 @@ demo = gr.Interface(
         label="AMR-Detect Result"
     ),
     title="AMR-Detect",
-    description="Antimicrobial Resistance Detection and Analysis",
+    description=(
+        "Antimicrobial Resistance Detection and Analysis"
+    ),
     flagging_mode="never"
 )
 
