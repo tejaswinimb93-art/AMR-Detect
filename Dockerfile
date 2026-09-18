@@ -11,12 +11,12 @@ RUN micromamba install -y -n base \
     ncbi-amrfinderplus=4.2.7 \
     && micromamba clean --all --yes
 
-RUN python -m pip install --no-cache-dir -r requirements.txt
+RUN /opt/conda/bin/python -m pip install --no-cache-dir -r requirements.txt
 
-RUN amrfinder -u
+RUN /opt/conda/bin/amrfinder -u
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER app/ .
 
 EXPOSE 7860
 
-CMD ["python", "app.py"]
+CMD ["/opt/conda/bin/python", "app.py"]
