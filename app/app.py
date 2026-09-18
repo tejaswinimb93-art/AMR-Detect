@@ -28,19 +28,8 @@ organism_groups = {
 
 def empty_result(message):
     return (
-        message,
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        ""
+        message, "", "", "", "", "", "", "", "",
+        "", "", "", "", ""
     )
 
 
@@ -51,10 +40,7 @@ def read_fasta(filepath):
         for line in file:
             line = line.strip()
 
-            if not line:
-                continue
-
-            if line.startswith(">"):
+            if not line or line.startswith(">"):
                 continue
 
             sequence += line.upper()
@@ -62,78 +48,8 @@ def read_fasta(filepath):
     return sequence
 
 
-def format_amr_result(output):
-    if not output.strip():
-        return "No AMR determinants were detected by AMRFinderPlus."
-
-    lines = output.strip().splitlines()
-
-    if len(lines) <= 1:
-        return output.strip()
-
-    header = lines[0].split("\t")
-
-    results = []
-
-    for line in lines[1:]:
-        values = line.split("\t")
-
-        row = dict(zip(header, values))
-
-        element_symbol = row.get(
-            "Element symbol",
-            row.get("Gene symbol", "Not reported")
-        )
-
-        element_name = row.get(
-            "Element name",
-            "Not reported"
-        )
-
-        resistance = row.get(
-            "Resistance",
-            "Not reported"
-        )
-
-        method = row.get(
-            "Method",
-            "Not reported"
-        )
-
-        target = row.get(
-            "Target",
-            "Not reported"
-        )
-
-        identity = row.get(
-            "% Identity",
-            "Not reported"
-        )
-
-        coverage = row.get(
-            "% Coverage",
-            "Not reported"
-        )
-
-        results.append(
-            f"AMR determinant: {element_symbol}\n"
-            f"Name: {element_name}\n"
-            f"Resistance: {resistance}\n"
-            f"Method: {method}\n"
-            f"Target: {target}\n"
-            f"Identity: {identity}\n"
-            f"Coverage: {coverage}\n"
-        )
-
-    return "\n------------------------------\n\n".join(results)
-
-
 def run_amrfinder(fasta_file, organism):
-    command = [
-        "amrfinder",
-        "-n",
-        fasta_file
-    ]
+    command = ["amrfinder", "-n", fasta_file]
 
     organism_group = organism_groups.get(organism)
 
@@ -149,40 +65,35 @@ def run_amrfinder(fasta_file, organism):
         )
 
         if result.returncode != 0:
-            error_message = result.stderr.strip()
-
-            if not error_message:
-                error_message = "AMRFinderPlus returned an unknown error."
-
             return (
                 "AMRFinderPlus analysis failed.\n\n"
-                + error_message
+                + (result.stderr.strip() or "Unknown AMRFinderPlus error.")
             )
 
-        return format_amr_result(result.stdout)
+        output = result.stdout.strip()
+
+        if not output:
+            return "No AMR determinants were detected."
+
+        return output
 
     except subprocess.TimeoutExpired:
-        return (
-            "AMRFinderPlus analysis timed out. "
-            "Please try a smaller FASTA file."
-        )
+        return "AMRFinderPlus analysis timed out."
 
     except FileNotFoundError:
-        return (
-            "AMRFinderPlus is not available in the deployment environment."
-        )
+        return "AMRFinderPlus was not found in the deployment environment."
 
     except Exception as error:
         return f"AMRFinderPlus error: {error}"
 
 
-def analyze_sample(organism, sample_id, fasta_file):
-
-    if not organism:
-        return empty_result("Please select an organism.")
+def analyse_sample(organism, sample_id, fasta_file):
 
     if not fasta_file:
         return empty_result("Please upload a FASTA file.")
+
+    if not organism:
+        organism = "Not specified"
 
     if not sample_id:
         sample_id = "Not provided"
@@ -195,9 +106,9 @@ def analyze_sample(organism, sample_id, fasta_file):
                 "Error: The FASTA file does not contain a DNA sequence."
             )
 
-        allowed_bases = set("ACGTN")
+        allowed = set("ACGTN")
 
-        if any(base not in allowed_bases for base in sequence):
+        if any(base not in allowed for base in sequence):
             return empty_result(
                 "Error: The FASTA sequence contains invalid DNA characters."
             )
@@ -223,19 +134,31 @@ def analyze_sample(organism, sample_id, fasta_file):
             organism
         )
 
-        summary = (
-            "Sample received and analysed successfully."
-        )
-
-        status = "AMR analysis completed"
-
-        next_stage = (
-            "Review AMRFinderPlus resistance determinants "
-            "and supporting sequence information."
-        )
+        if amr_result.startswith("No AMR determinants"):
+            amr_status = "No known AMR determinant detected"
+            susceptibility_note = (
+                "No known genomic AMR determinant was detected "
+                "by this screening. This does not confirm clinical "
+                "susceptibility; phenotypic antimicrobial susceptibility "
+                "testing (AST) is required."
+            )
+        elif amr_result.startswith("AMRFinderPlus analysis failed"):
+            amr_status = "AMR analysis could not be completed"
+            susceptibility_note = (
+                "Susceptibility cannot be inferred because the "
+                "genomic AMR analysis did not complete."
+            )
+        else:
+            amr_status = "AMR determinant(s) detected"
+            susceptibility_note = (
+                "Antibiotics without a detected known genomic resistance "
+                "determinant should not automatically be considered "
+                "clinically susceptible. Phenotypic AST is required "
+                "for confirmation."
+            )
 
         return (
-            summary,
+            "Sample received and analysed successfully.",
             sample_id,
             organism,
             filename,
@@ -246,8 +169,9 @@ def analyze_sample(organism, sample_id, fasta_file):
             str(t_count),
             str(n_count),
             f"{gc_content:.2f}%",
-            status,
-            amr_result
+            amr_status,
+            amr_result,
+            susceptibility_note
         )
 
     except Exception as error:
@@ -257,7 +181,7 @@ def analyze_sample(organism, sample_id, fasta_file):
 
 
 demo = gr.Interface(
-    fn=analyze_sample,
+    fn=analyse_sample,
 
     inputs=[
         gr.Dropdown(
@@ -290,8 +214,9 @@ demo = gr.Interface(
         gr.Textbox(label="T"),
         gr.Textbox(label="N"),
         gr.Textbox(label="GC content"),
-        gr.Textbox(label="Status"),
-        gr.Textbox(label="AMRFinderPlus Result")
+        gr.Textbox(label="AMR status"),
+        gr.Textbox(label="AMRFinderPlus Result"),
+        gr.Textbox(label="Susceptibility interpretation")
     ],
 
     title="AMR-Detect",
