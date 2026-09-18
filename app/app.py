@@ -17,19 +17,31 @@ organisms = [
 
 organism_groups = {
     "Escherichia coli": "Escherichia",
-    "Klebsiella pneumoniae": "Klebsiella",
-    "Staphylococcus aureus": "Staphylococcus",
-    "Pseudomonas aeruginosa": "Pseudomonas",
-    "Acinetobacter baumannii": "Acinetobacter",
-    "Enterococcus faecalis": "Enterococcus",
+    "Klebsiella pneumoniae": "Klebsiella_pneumoniae",
+    "Staphylococcus aureus": "Staphylococcus_aureus",
+    "Pseudomonas aeruginosa": "Pseudomonas_aeruginosa",
+    "Acinetobacter baumannii": "Acinetobacter_baumannii",
+    "Enterococcus faecalis": "Enterococcus_faecalis",
     "Salmonella spp.": "Salmonella"
 }
 
 
 def empty_result(message):
     return (
-        message, "", "", "", "", "", "", "", "",
-        "", "", "", "", ""
+        message,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
     )
 
 
@@ -65,26 +77,41 @@ def run_amrfinder(fasta_file, organism):
         )
 
         if result.returncode != 0:
+            error_message = result.stderr.strip()
+
+            if not error_message:
+                error_message = "Unknown AMRFinderPlus error."
+
             return (
                 "AMRFinderPlus analysis failed.\n\n"
-                + (result.stderr.strip() or "Unknown AMRFinderPlus error.")
+                f"Running: {' '.join(command)}\n\n"
+                f"{error_message}"
             )
 
         output = result.stdout.strip()
 
         if not output:
-            return "No AMR determinants were detected."
+            return "No AMR determinants were detected by AMRFinderPlus."
 
         return output
 
     except subprocess.TimeoutExpired:
-        return "AMRFinderPlus analysis timed out."
+        return (
+            "AMRFinderPlus analysis failed.\n\n"
+            "The analysis timed out."
+        )
 
     except FileNotFoundError:
-        return "AMRFinderPlus was not found in the deployment environment."
+        return (
+            "AMRFinderPlus analysis failed.\n\n"
+            "AMRFinderPlus was not found in the deployment environment."
+        )
 
     except Exception as error:
-        return f"AMRFinderPlus error: {error}"
+        return (
+            "AMRFinderPlus analysis failed.\n\n"
+            f"Error: {error}"
+        )
 
 
 def analyse_sample(organism, sample_id, fasta_file):
@@ -134,27 +161,36 @@ def analyse_sample(organism, sample_id, fasta_file):
             organism
         )
 
-        if amr_result.startswith("No AMR determinants"):
+        if amr_result.startswith(
+            "No AMR determinants were detected"
+        ):
             amr_status = "No known AMR determinant detected"
+
             susceptibility_note = (
                 "No known genomic AMR determinant was detected "
                 "by this screening. This does not confirm clinical "
-                "susceptibility; phenotypic antimicrobial susceptibility "
-                "testing (AST) is required."
+                "susceptibility. Phenotypic antimicrobial susceptibility "
+                "testing (AST) is required for confirmation."
             )
-        elif amr_result.startswith("AMRFinderPlus analysis failed"):
+
+        elif amr_result.startswith(
+            "AMRFinderPlus analysis failed"
+        ):
             amr_status = "AMR analysis could not be completed"
+
             susceptibility_note = (
                 "Susceptibility cannot be inferred because the "
                 "genomic AMR analysis did not complete."
             )
+
         else:
             amr_status = "AMR determinant(s) detected"
+
             susceptibility_note = (
-                "Antibiotics without a detected known genomic resistance "
-                "determinant should not automatically be considered "
-                "clinically susceptible. Phenotypic AST is required "
-                "for confirmation."
+                "The detected genomic determinants may be associated "
+                "with antimicrobial resistance. Absence of a detected "
+                "resistance determinant does not prove susceptibility. "
+                "Phenotypic AST is required for clinical confirmation."
             )
 
         return (
