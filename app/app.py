@@ -1,6 +1,7 @@
 import os
 import subprocess
 import gradio as gr
+import pandas as pd
 
 
 organisms = [
@@ -24,25 +25,6 @@ organism_groups = {
     "Enterococcus faecalis": "Enterococcus_faecalis",
     "Salmonella spp.": "Salmonella"
 }
-
-
-def empty_result(message):
-    return (
-        message,
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        ""
-    )
 
 
 def read_fasta(filepath):
@@ -77,47 +59,30 @@ def run_amrfinder(fasta_file, organism):
         )
 
         if result.returncode != 0:
-            error_message = result.stderr.strip()
-
-            if not error_message:
-                error_message = "Unknown AMRFinderPlus error."
-
             return (
                 "AMRFinderPlus analysis failed.\n\n"
-                f"Running: {' '.join(command)}\n\n"
-                f"{error_message}"
+                + (result.stderr.strip() or "Unknown error.")
             )
 
         output = result.stdout.strip()
 
         if not output:
-            return "No AMR determinants were detected by AMRFinderPlus."
+            return "No AMR determinants were detected."
 
         return output
 
-    except subprocess.TimeoutExpired:
-        return (
-            "AMRFinderPlus analysis failed.\n\n"
-            "The analysis timed out."
-        )
-
-    except FileNotFoundError:
-        return (
-            "AMRFinderPlus analysis failed.\n\n"
-            "AMRFinderPlus was not found in the deployment environment."
-        )
-
     except Exception as error:
-        return (
-            "AMRFinderPlus analysis failed.\n\n"
-            f"Error: {error}"
-        )
+        return f"AMRFinderPlus error: {error}"
 
 
-def analyse_sample(organism, sample_id, fasta_file):
+def analyse_single(organism, sample_id, fasta_file):
 
     if not fasta_file:
-        return empty_result("Please upload a FASTA file.")
+        return (
+            "Please upload a FASTA file.",
+            "", "", "", "", "", "", "", "",
+            "", "", "", ""
+        )
 
     if not organism:
         organism = "Not specified"
@@ -129,15 +94,19 @@ def analyse_sample(organism, sample_id, fasta_file):
         sequence = read_fasta(fasta_file)
 
         if not sequence:
-            return empty_result(
-                "Error: The FASTA file does not contain a DNA sequence."
+            return (
+                "The FASTA file does not contain a nucleotide sequence.",
+                "", "", "", "", "", "", "", "",
+                "", "", "", ""
             )
 
         allowed = set("ACGTN")
 
         if any(base not in allowed for base in sequence):
-            return empty_result(
-                "Error: The FASTA sequence contains invalid DNA characters."
+            return (
+                "The FASTA sequence contains invalid nucleotide characters.",
+                "", "", "", "", "", "", "", "",
+                "", "", "", ""
             )
 
         length = len(sequence)
@@ -161,24 +130,19 @@ def analyse_sample(organism, sample_id, fasta_file):
             organism
         )
 
-        if amr_result.startswith(
-            "No AMR determinants were detected"
-        ):
+        if amr_result.startswith("No AMR determinants"):
             amr_status = "No known AMR determinant detected"
 
-            susceptibility_note = (
+            susceptibility = (
                 "No known genomic AMR determinant was detected "
                 "by this screening. This does not confirm clinical "
-                "susceptibility. Phenotypic antimicrobial susceptibility "
-                "testing (AST) is required for confirmation."
+                "susceptibility. Phenotypic AST is required."
             )
 
-        elif amr_result.startswith(
-            "AMRFinderPlus analysis failed"
-        ):
+        elif amr_result.startswith("AMRFinderPlus analysis failed"):
             amr_status = "AMR analysis could not be completed"
 
-            susceptibility_note = (
+            susceptibility = (
                 "Susceptibility cannot be inferred because the "
                 "genomic AMR analysis did not complete."
             )
@@ -186,10 +150,10 @@ def analyse_sample(organism, sample_id, fasta_file):
         else:
             amr_status = "AMR determinant(s) detected"
 
-            susceptibility_note = (
-                "The detected genomic determinants may be associated "
-                "with antimicrobial resistance. Absence of a detected "
-                "resistance determinant does not prove susceptibility. "
+            susceptibility = (
+                "Detected genomic determinants may be associated "
+                "with antimicrobial resistance. Absence of a "
+                "detected determinant does not prove susceptibility. "
                 "Phenotypic AST is required for clinical confirmation."
             )
 
@@ -207,62 +171,262 @@ def analyse_sample(organism, sample_id, fasta_file):
             f"{gc_content:.2f}%",
             amr_status,
             amr_result,
-            susceptibility_note
+            susceptibility
         )
 
     except Exception as error:
-        return empty_result(
-            f"Error while processing the FASTA file: {error}"
+        return (
+            f"Error: {error}",
+            "", "", "", "", "", "", "", "",
+            "", "", "", ""
         )
 
 
-demo = gr.Interface(
-    fn=analyse_sample,
+def analyse_multiple(organism, files):
 
-    inputs=[
-        gr.Dropdown(
+    if not files:
+        return pd.DataFrame(
+            columns=[
+                "Sample ID",
+                "FASTA file",
+                "Organism",
+                "Sequence length",
+                "GC content",
+                "AMR status",
+                "AMRFinderPlus result"
+            ]
+        )
+
+    results = []
+
+    for index, fasta_file in enumerate(files, start=1):
+
+        sample_id = f"AMR-BATCH-{index:03d}"
+        filename = os.path.basename(fasta_file)
+
+        try:
+            sequence = read_fasta(fasta_file)
+
+            if not sequence:
+                results.append({
+                    "Sample ID": sample_id,
+                    "FASTA file": filename,
+                    "Organism": organism or "Not specified",
+                    "Sequence length": 0,
+                    "GC content": "N/A",
+                    "AMR status": "Invalid FASTA",
+                    "AMRFinderPlus result": "No nucleotide sequence found."
+                })
+                continue
+
+            length = len(sequence)
+
+            gc_content = (
+                ((sequence.count("G") + sequence.count("C")) / length) * 100
+                if length > 0
+                else 0
+            )
+
+            amr_result = run_amrfinder(
+                fasta_file,
+                organism
+            )
+
+            if amr_result.startswith("No AMR determinants"):
+                status = "No known AMR determinant detected"
+
+            elif amr_result.startswith("AMRFinderPlus analysis failed"):
+                status = "AMR analysis failed"
+
+            else:
+                status = "AMR determinant(s) detected"
+
+            results.append({
+                "Sample ID": sample_id,
+                "FASTA file": filename,
+                "Organism": organism or "Not specified",
+                "Sequence length": length,
+                "GC content": f"{gc_content:.2f}%",
+                "AMR status": status,
+                "AMRFinderPlus result": amr_result
+            })
+
+        except Exception as error:
+
+            results.append({
+                "Sample ID": sample_id,
+                "FASTA file": filename,
+                "Organism": organism or "Not specified",
+                "Sequence length": "Error",
+                "GC content": "Error",
+                "AMR status": "Analysis failed",
+                "AMRFinderPlus result": str(error)
+            })
+
+    return pd.DataFrame(results)
+
+
+with gr.Blocks(title="AMR-Detect") as demo:
+
+    gr.Markdown(
+        """
+        # 🧬 AMR-Detect
+
+        ### Antimicrobial Resistance Detection and Analysis
+
+        Genomic screening using AMRFinderPlus with support for
+        single-sample and multiple-sample analysis.
+        """
+    )
+
+    with gr.Tab("Single Sample"):
+
+        single_organism = gr.Dropdown(
             choices=organisms,
-            label="Select organism",
-            info="Choose the organism associated with the sample."
-        ),
+            label="Select organism"
+        )
 
-        gr.Textbox(
+        single_sample_id = gr.Textbox(
             label="Sample ID",
             placeholder="Example: AMR001"
-        ),
+        )
 
-        gr.File(
+        single_file = gr.File(
             label="Upload FASTA sequence",
             file_types=[".fa", ".fasta", ".fna"],
             type="filepath"
         )
-    ],
 
-    outputs=[
-        gr.Textbox(label="Analysis summary"),
-        gr.Textbox(label="Sample ID"),
-        gr.Textbox(label="Organism"),
-        gr.Textbox(label="FASTA file"),
-        gr.Textbox(label="Sequence length"),
-        gr.Textbox(label="A"),
-        gr.Textbox(label="G"),
-        gr.Textbox(label="C"),
-        gr.Textbox(label="T"),
-        gr.Textbox(label="N"),
-        gr.Textbox(label="GC content"),
-        gr.Textbox(label="AMR status"),
-        gr.Textbox(label="AMRFinderPlus Result"),
-        gr.Textbox(label="Susceptibility interpretation")
-    ],
+        single_button = gr.Button(
+            "🧬 Analyse Sample",
+            variant="primary"
+        )
 
-    title="AMR-Detect",
+        single_summary = gr.Textbox(
+            label="Analysis summary"
+        )
 
-    description=(
-        "Antimicrobial Resistance Detection and Analysis"
-    ),
+        with gr.Row():
+            single_id = gr.Textbox(label="Sample ID")
+            single_org = gr.Textbox(label="Organism")
 
-    flagging_mode="never"
-)
+        single_filename = gr.Textbox(
+            label="FASTA file"
+        )
+
+        with gr.Row():
+            single_length = gr.Textbox(
+                label="Sequence length"
+            )
+
+            single_gc = gr.Textbox(
+                label="GC content"
+            )
+
+            single_status = gr.Textbox(
+                label="AMR status"
+            )
+
+        with gr.Row():
+            single_a = gr.Textbox(label="A")
+            single_g = gr.Textbox(label="G")
+            single_c = gr.Textbox(label="C")
+            single_t = gr.Textbox(label="T")
+            single_n = gr.Textbox(label="N")
+
+        single_amr = gr.Textbox(
+            label="AMRFinderPlus Result",
+            lines=12
+        )
+
+        single_susceptibility = gr.Textbox(
+            label="Susceptibility interpretation",
+            lines=5
+        )
+
+        single_button.click(
+            fn=analyse_single,
+            inputs=[
+                single_organism,
+                single_sample_id,
+                single_file
+            ],
+            outputs=[
+                single_summary,
+                single_id,
+                single_org,
+                single_filename,
+                single_length,
+                single_a,
+                single_g,
+                single_c,
+                single_t,
+                single_n,
+                single_gc,
+                single_status,
+                single_amr,
+                single_susceptibility
+            ]
+        )
+
+    with gr.Tab("Multiple Samples"):
+
+        batch_organism = gr.Dropdown(
+            choices=organisms,
+            label="Select organism",
+            info="The selected organism will be used for all uploaded samples."
+        )
+
+        batch_files = gr.File(
+            label="Upload multiple FASTA files",
+            file_types=[".fa", ".fasta", ".fna"],
+            type="filepath",
+            file_count="multiple"
+        )
+
+        batch_button = gr.Button(
+            "🔬 Analyse Multiple Samples",
+            variant="primary"
+        )
+
+        batch_results = gr.Dataframe(
+            headers=[
+                "Sample ID",
+                "FASTA file",
+                "Organism",
+                "Sequence length",
+                "GC content",
+                "AMR status",
+                "AMRFinderPlus result"
+            ],
+            label="Multiple Sample AMR Comparison",
+            interactive=False,
+            wrap=True
+        )
+
+        batch_button.click(
+            fn=analyse_multiple,
+            inputs=[
+                batch_organism,
+                batch_files
+            ],
+            outputs=batch_results
+        )
+
+    gr.Markdown(
+        """
+        ---
+        
+        ### 🩺 Professional review
+
+        AMR-Detect provides genomic screening information and
+        experimental analysis support. Genomic findings do not
+        independently confirm clinical antimicrobial susceptibility.
+        Final interpretation and treatment decisions require qualified
+        healthcare-professional review together with validated
+        antimicrobial susceptibility testing (AST) and clinical context.
+        """
+    )
 
 
 port = int(os.environ.get("PORT", "7860"))
