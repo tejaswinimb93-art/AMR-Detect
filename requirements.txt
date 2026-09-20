@@ -1,3 +1,5 @@
 gradio
 pandas
-biopython
+openpyxl
+xlrd
+matplotlib
