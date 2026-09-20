@@ -215,23 +215,42 @@ def calculate_mic_series(data):
     except Exception as e:
         return empty, f"MIC series could not be analysed: {e}"
 
-def add_ast_result(data, sample_id, antibiotic, mic, unit, ast_result, notes):
+def add_ast_result(data, genomic_data, sample_id, antibiotic, mic, unit, ast_result, ph, temperature, notes):
     columns=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison","Other information"]
     try:
         df=data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(columns=columns)
         if df.empty: df=pd.DataFrame(columns=columns)
         for col in columns:
             if col not in df.columns: df[col]=""
-        if not str(sample_id).strip(): return df, "Please enter a Sample ID."
-        if not str(antibiotic).strip(): return df, "Please enter an antibiotic."
-        if not str(mic).strip(): return df, "Please enter the MIC value."
-        try:
-            float(mic)
-        except ValueError:
-            return df, "MIC must be a numeric value."
-        row={"Sample ID":str(sample_id).strip(),"AMR Finding":"","Antibiotic":str(antibiotic).strip(),"MIC":str(mic).strip(),"MIC unit":str(unit).strip(),"AST":str(ast_result).strip(),"pH":"","Temperature":"","Comparison":"","Other information":str(notes).strip()}
+        sample_id=str(sample_id).strip()
+        if not sample_id: return df[columns], "Please enter a Sample ID."
+        if not str(antibiotic).strip(): return df[columns], "Please enter an antibiotic."
+        if not str(mic).strip(): return df[columns], "Please enter the MIC value."
+        try: float(mic)
+        except ValueError: return df[columns], "MIC must be a numeric value."
+        for label, value in (("pH", ph), ("Temperature", temperature)):
+            if str(value).strip():
+                try: float(value)
+                except ValueError: return df[columns], f"{label} must be numeric."
+
+        amr_finding = ""
+        if isinstance(genomic_data, pd.DataFrame) and not genomic_data.empty and "Sample ID" in genomic_data.columns:
+            hits = genomic_data[genomic_data["Sample ID"].astype(str).str.strip().eq(sample_id)]
+            if not hits.empty:
+                if "AMR status" in hits.columns:
+                    amr_finding = str(hits.iloc[0]["AMR status"])
+                elif "AMR Finding" in hits.columns:
+                    amr_finding = str(hits.iloc[0]["AMR Finding"])
+
+        row={"Sample ID":sample_id,"AMR Finding":amr_finding,"Antibiotic":str(antibiotic).strip(),
+             "MIC":str(mic).strip(),"MIC unit":str(unit).strip(),"AST":str(ast_result).strip(),
+             "pH":str(ph).strip(),"Temperature":str(temperature).strip(),"Comparison":"",
+             "Other information":str(notes).strip()}
         df=pd.concat([df,pd.DataFrame([row])],ignore_index=True)
-        return df[columns], f"Added AST/MIC result for {sample_id}."
+        note = f"Added AST/MIC result for {sample_id}."
+        if not amr_finding:
+            note += " AMR Finding will populate after genomic analysis for the same Sample ID."
+        return df[columns], note
     except Exception as e:
         return data, f"Could not add result: {e}"
 
@@ -243,18 +262,36 @@ def load_ast_csv(csv_file):
     try:
         ext=os.path.splitext(csv_file)[1].lower()
         if ext in {".xlsx", ".xls"}:
-            df=pd.read_excel(csv_file)
+            try:
+                df=pd.read_excel(csv_file)
+            except ImportError as e:
+                return pd.DataFrame(columns=columns), "Excel support is not installed on the server. Add openpyxl to requirements.txt and redeploy AMRIVA."
         else:
             df=pd.read_csv(csv_file)
-        aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","antibiotic":"Antibiotic","Antibiotic":"Antibiotic","MIC":"MIC","mic":"MIC","MIC unit":"MIC unit","mic_unit":"MIC unit","Unit":"MIC unit","unit":"MIC unit","AST":"AST","ast":"AST","AST result":"AST","pH":"pH","ph":"pH","temperature":"Temperature","temp":"Temperature","AMR Finding":"AMR Finding","amr_finding":"AMR Finding","Other information":"Other information","Notes":"Other information","notes":"Other information"}
-        df=df.rename(columns={c:aliases.get(c,c) for c in df.columns})
+        aliases={
+            "sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","Sample ID":"Sample ID",
+            "antibiotic":"Antibiotic","Antibiotic":"Antibiotic",
+            "MIC":"MIC","mic":"MIC","mic_value":"MIC","MIC value":"MIC",
+            "MIC unit":"MIC unit","mic_unit":"MIC unit","Unit":"MIC unit","unit":"MIC unit",
+            "AST":"AST","ast":"AST","AST result":"AST","ast_result":"AST",
+            "pH":"pH","ph":"pH","PH":"pH",
+            "temperature":"Temperature","temp":"Temperature","Temperature (C)":"Temperature","Temperature (°C)":"Temperature",
+            "AMR Finding":"AMR Finding","amr_finding":"AMR Finding","AMR status":"AMR Finding",
+            "Comparison":"Comparison","comparison":"Comparison",
+            "Other information":"Other information","Other Information":"Other information","Notes":"Other information","notes":"Other information","Experimental notes":"Other information"
+        }
+        df=df.rename(columns={c:aliases.get(str(c).strip(),str(c).strip()) for c in df.columns})
+        # Also support a headerless spreadsheet using the documented column order.
+        required_basic={"Sample ID","Antibiotic","MIC"}
+        if not required_basic.issubset(set(df.columns)) and len(df.columns) >= 3:
+            positional=["Sample ID","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information"]
+            df.columns=positional[:len(df.columns)]
         for col in columns:
             if col not in df.columns: df[col]=""
-        df=df[columns].copy()
-        return df, f"Loaded {len(df)} AST/MIC row(s) from CSV."
+        df=df[columns].copy().fillna("")
+        return df, f"Loaded {len(df)} AST/MIC row(s) from {ext.upper().replace('.', '')} file."
     except Exception as e:
-        return pd.DataFrame(columns=columns), f"CSV could not be loaded: {e}"
-
+        return pd.DataFrame(columns=columns), f"AST/MIC spreadsheet could not be loaded: {e}"
 
 
 def parse_pasted_ast_data(pasted_text):
@@ -594,7 +631,10 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
                 ast_unit=gr.Dropdown(["µg/mL","mg/L","other"],value="µg/mL",label="MIC unit")
             with gr.Row():
                 ast_result=gr.Dropdown(["Susceptible","Intermediate","Resistant","Not provided"],value="Not provided",label="AST result")
+                ast_ph=gr.Textbox(label="pH",placeholder="e.g. 7.0")
+                ast_temperature=gr.Textbox(label="Temperature (°C)",placeholder="e.g. 37")
                 ast_notes=gr.Textbox(label="Experimental notes",placeholder="Optional")
+            gr.Markdown("**AMR Finding:** AMRIVA will automatically pull the genomic AMR status for this Sample ID when the same Sample ID has already been analysed in the genomic section. **pH and temperature** are entered from laboratory/research observations.")
             ast_add=gr.Button("＋ Add AST/MIC Result",variant="primary")
             ast_message=gr.Markdown()
             ast_table=gr.Dataframe(
@@ -603,11 +643,12 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
                 datatype=["str"]*10,
                 interactive=True,
                 wrap=True,
+                column_widths=[120,170,150,90,90,120,70,100,130,180],
                 label="AST/MIC results — add as many samples/antibiotics as needed"
             )
             ast_add.click(
                 add_ast_result,
-                [ast_table,ast_sample,ast_antibiotic,ast_mic,ast_unit,ast_result,ast_notes],
+                [ast_table,genomic_state,ast_sample,ast_antibiotic,ast_mic,ast_unit,ast_result,ast_ph,ast_temperature,ast_notes],
                 [ast_table,ast_message]
             )
 
@@ -637,7 +678,7 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
                     mic_paste=gr.Textbox(label="📋 Paste MIC series from Excel",placeholder="Sample ID<TAB>Antibiotic<TAB>Concentration<TAB>Unit<TAB>Growth",lines=7)
                     mic_paste_button=gr.Button("📋 Load Pasted MIC Rows")
                 with gr.Column(scale=2):
-                    mic_series=gr.Dataframe(headers=MIC_SERIES_COLUMNS,value=[],datatype=["str"]*5,interactive=True,wrap=True,label="MIC observations — supports multiple samples")
+                    mic_series=gr.Dataframe(headers=MIC_SERIES_COLUMNS,value=[],datatype=["str"]*5,interactive=True,wrap=True,column_widths=[130,170,120,90,130],label="MIC observations — supports multiple samples")
 
             mic_file_message=gr.Markdown()
             mic_paste_message=gr.Markdown()
@@ -650,16 +691,29 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
                     return pd.DataFrame(columns=MIC_SERIES_COLUMNS), "No MIC file selected."
                 try:
                     ext=os.path.splitext(path)[1].lower()
-                    df=pd.read_excel(path) if ext in {".xlsx",".xls"} else pd.read_csv(path)
-                    aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID",
-                             "antibiotic":"Antibiotic","Antibiotic":"Antibiotic","concentration":"Concentration",
-                             "Concentration":"Concentration","conc":"Concentration","unit":"Unit","Unit":"Unit",
-                             "growth":"Growth","Growth":"Growth","Observation":"Growth","observation":"Growth"}
+                    if ext in {".xlsx", ".xls"}:
+                        try:
+                            df=pd.read_excel(path)
+                        except ImportError:
+                            return pd.DataFrame(columns=MIC_SERIES_COLUMNS), "Excel support is not installed on the server. Add openpyxl to requirements.txt and redeploy AMRIVA."
+                    else:
+                        df=pd.read_csv(path)
+                    aliases={
+                        "sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","Sample ID":"Sample ID",
+                        "antibiotic":"Antibiotic","Antibiotic":"Antibiotic",
+                        "concentration":"Concentration","Concentration":"Concentration","conc":"Concentration",
+                        "concentration value":"Concentration","Concentration value":"Concentration","MIC concentration":"Concentration",
+                        "unit":"Unit","Unit":"Unit","MIC unit":"Unit","mic_unit":"Unit",
+                        "growth":"Growth","Growth":"Growth","Growth / No growth":"Growth","growth/no growth":"Growth",
+                        "Observation":"Growth","observation":"Growth","Result":"Growth","result":"Growth"
+                    }
                     df=df.rename(columns={c:aliases.get(str(c).strip(),str(c).strip()) for c in df.columns})
+                    if not {"Sample ID","Antibiotic","Concentration"}.issubset(set(df.columns)) and len(df.columns)>=3:
+                        df.columns=MIC_SERIES_COLUMNS[:len(df.columns)]
                     for c in MIC_SERIES_COLUMNS:
                         if c not in df.columns: df[c]=""
                     df=df[MIC_SERIES_COLUMNS].fillna("")
-                    return df, f"Loaded {len(df)} MIC observation row(s)."
+                    return df, f"Loaded {len(df)} MIC observation row(s) from {ext.upper().replace('.', '')} file."
                 except Exception as e:
                     return pd.DataFrame(columns=MIC_SERIES_COLUMNS), f"MIC file could not be loaded: {e}"
 
@@ -669,12 +723,24 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
                 try:
                     from io import StringIO
                     raw=str(text).strip()
-                    df=pd.read_csv(StringIO(raw),sep="\t")
-                    if len(df.columns)==1: df=pd.read_csv(StringIO(raw),sep=None,engine="python")
-                    aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","antibiotic":"Antibiotic","Antibiotic":"Antibiotic","concentration":"Concentration","Concentration":"Concentration","conc":"Concentration","unit":"Unit","Unit":"Unit","growth":"Growth","Growth":"Growth","Observation":"Growth","observation":"Growth"}
+                    # First try Excel's tab-separated clipboard format.
+                    df=pd.read_csv(StringIO(raw),sep="\t",header=0)
+                    if len(df.columns)==1:
+                        df=pd.read_csv(StringIO(raw),sep=None,engine="python",header=0)
+                    aliases={
+                        "sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","Sample ID":"Sample ID",
+                        "antibiotic":"Antibiotic","Antibiotic":"Antibiotic",
+                        "concentration":"Concentration","Concentration":"Concentration","conc":"Concentration",
+                        "unit":"Unit","Unit":"Unit","MIC unit":"Unit","mic_unit":"Unit",
+                        "growth":"Growth","Growth":"Growth","Growth / No growth":"Growth","growth/no growth":"Growth",
+                        "Observation":"Growth","observation":"Growth","Result":"Growth","result":"Growth"
+                    }
                     df=df.rename(columns={c:aliases.get(str(c).strip(),str(c).strip()) for c in df.columns})
-                    if not any(c in df.columns for c in ["Sample ID","Antibiotic","Concentration","Growth"]):
+                    if not {"Sample ID","Antibiotic","Concentration","Growth"}.issubset(set(df.columns)):
+                        # Headerless paste: use the exact documented order.
                         df=pd.read_csv(StringIO(raw),sep="\t",header=None)
+                        if len(df.columns)==1:
+                            df=pd.read_csv(StringIO(raw),sep=None,engine="python",header=None)
                         df.columns=MIC_SERIES_COLUMNS[:len(df.columns)]
                     for c in MIC_SERIES_COLUMNS:
                         if c not in df.columns: df[c]=""
