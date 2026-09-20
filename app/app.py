@@ -686,70 +686,112 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             mic_message=gr.Markdown()
             mic_results=gr.Dataframe(headers=["Sample ID","Antibiotic","MIC","Unit","Lowest no-growth concentration","Interpretation note"],interactive=False,wrap=True,label="Calculated MIC results")
 
+            def _normalise_mic_dataframe(df):
+                """Normalise an uploaded/pasted MIC-series table to the five required columns."""
+                if df is None:
+                    raise ValueError("No MIC data was supplied.")
+
+                df = df.copy()
+                df.columns = [str(c).strip() for c in df.columns]
+
+                aliases = {
+                    "sample id":"Sample ID", "sample_id":"Sample ID", "sample_id ":"Sample ID",
+                    "sample":"Sample ID", "sample name":"Sample ID",
+                    "antibiotic":"Antibiotic", "drug":"Antibiotic", "antimicrobial":"Antibiotic",
+                    "concentration":"Concentration", "conc":"Concentration",
+                    "concentration value":"Concentration", "mic concentration":"Concentration",
+                    "mic":"Concentration", "mic value":"Concentration",
+                    "unit":"Unit", "mic unit":"Unit", "mic_unit":"Unit",
+                    "growth":"Growth", "growth/no growth":"Growth", "growth / no growth":"Growth",
+                    "growth status":"Growth", "observation":"Growth", "result":"Growth"
+                }
+                renamed = {}
+                for c in df.columns:
+                    key = str(c).strip().lower()
+                    renamed[c] = aliases.get(key, c)
+                df = df.rename(columns=renamed)
+
+                required = ["Sample ID", "Antibiotic", "Concentration", "Unit", "Growth"]
+
+                # Headerless five-column data is accepted in the documented order.
+                if not set(required).issubset(df.columns):
+                    if len(df.columns) == 5:
+                        df.columns = required
+                    else:
+                        missing = [c for c in required if c not in df.columns]
+                        raise ValueError(
+                            "This is not a MIC concentration-series file. "
+                            "Required columns are: Sample ID, Antibiotic, Concentration, Unit, Growth. "
+                            f"Missing: {', '.join(missing)}."
+                        )
+
+                df = df[required].copy().fillna("")
+                # Remove completely empty rows.
+                mask = df.astype(str).apply(lambda row: any(v.strip() for v in row), axis=1)
+                df = df.loc[mask].reset_index(drop=True)
+                if df.empty:
+                    raise ValueError("The MIC file contains no data rows.")
+                return df
+
             def load_mic_file(path):
                 if not path:
                     return pd.DataFrame(columns=MIC_SERIES_COLUMNS), "No MIC file selected."
                 try:
-                    ext=os.path.splitext(path)[1].lower()
-                    if ext in {".xlsx", ".xls"}:
+                    # Gradio may return a string path or a one-item list in some versions.
+                    if isinstance(path, (list, tuple)):
+                        path = path[0] if path else None
+                    if not path:
+                        return pd.DataFrame(columns=MIC_SERIES_COLUMNS), "No MIC file selected."
+
+                    ext = os.path.splitext(str(path))[1].lower()
+                    if ext == ".xlsx":
+                        df = pd.read_excel(path, engine="openpyxl")
+                    elif ext == ".xls":
                         try:
-                            df=pd.read_excel(path)
+                            df = pd.read_excel(path, engine="xlrd")
                         except ImportError:
-                            return pd.DataFrame(columns=MIC_SERIES_COLUMNS), "Excel support is not installed on the server. Add openpyxl to requirements.txt and redeploy AMRIVA."
+                            return pd.DataFrame(columns=MIC_SERIES_COLUMNS), "Old .xls files need xlrd. Please use .xlsx or CSV."
+                    elif ext == ".csv":
+                        df = pd.read_csv(path)
                     else:
-                        df=pd.read_csv(path)
-                    aliases={
-                        "sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","Sample ID":"Sample ID",
-                        "antibiotic":"Antibiotic","Antibiotic":"Antibiotic",
-                        "concentration":"Concentration","Concentration":"Concentration","conc":"Concentration",
-                        "concentration value":"Concentration","Concentration value":"Concentration","MIC concentration":"Concentration",
-                        "unit":"Unit","Unit":"Unit","MIC unit":"Unit","mic_unit":"Unit",
-                        "growth":"Growth","Growth":"Growth","Growth / No growth":"Growth","growth/no growth":"Growth",
-                        "Observation":"Growth","observation":"Growth","Result":"Growth","result":"Growth"
-                    }
-                    df=df.rename(columns={c:aliases.get(str(c).strip(),str(c).strip()) for c in df.columns})
-                    if not {"Sample ID","Antibiotic","Concentration"}.issubset(set(df.columns)) and len(df.columns)>=3:
-                        df.columns=MIC_SERIES_COLUMNS[:len(df.columns)]
-                    for c in MIC_SERIES_COLUMNS:
-                        if c not in df.columns: df[c]=""
-                    df=df[MIC_SERIES_COLUMNS].fillna("")
-                    return df, f"Loaded {len(df)} MIC observation row(s) from {ext.upper().replace('.', '')} file."
+                        return pd.DataFrame(columns=MIC_SERIES_COLUMNS), "Unsupported file type. Please upload CSV, XLSX or XLS."
+
+                    df = _normalise_mic_dataframe(df)
+                    return df, f"✅ Loaded {len(df)} MIC observation row(s) from {ext.upper().replace('.', '')}."
                 except Exception as e:
-                    return pd.DataFrame(columns=MIC_SERIES_COLUMNS), f"MIC file could not be loaded: {e}"
+                    return pd.DataFrame(columns=MIC_SERIES_COLUMNS), f"❌ MIC file could not be loaded: {e}"
 
             def parse_pasted_mic(text):
                 if not text or not str(text).strip():
                     return pd.DataFrame(columns=MIC_SERIES_COLUMNS), "Nothing was pasted."
                 try:
                     from io import StringIO
-                    raw=str(text).strip()
-                    # First try Excel's tab-separated clipboard format.
-                    df=pd.read_csv(StringIO(raw),sep="\t",header=0)
-                    if len(df.columns)==1:
-                        df=pd.read_csv(StringIO(raw),sep=None,engine="python",header=0)
-                    aliases={
-                        "sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","Sample ID":"Sample ID",
-                        "antibiotic":"Antibiotic","Antibiotic":"Antibiotic",
-                        "concentration":"Concentration","Concentration":"Concentration","conc":"Concentration",
-                        "unit":"Unit","Unit":"Unit","MIC unit":"Unit","mic_unit":"Unit",
-                        "growth":"Growth","Growth":"Growth","Growth / No growth":"Growth","growth/no growth":"Growth",
-                        "Observation":"Growth","observation":"Growth","Result":"Growth","result":"Growth"
-                    }
-                    df=df.rename(columns={c:aliases.get(str(c).strip(),str(c).strip()) for c in df.columns})
-                    if not {"Sample ID","Antibiotic","Concentration","Growth"}.issubset(set(df.columns)):
-                        # Headerless paste: use the exact documented order.
-                        df=pd.read_csv(StringIO(raw),sep="\t",header=None)
-                        if len(df.columns)==1:
-                            df=pd.read_csv(StringIO(raw),sep=None,engine="python",header=None)
-                        df.columns=MIC_SERIES_COLUMNS[:len(df.columns)]
-                    for c in MIC_SERIES_COLUMNS:
-                        if c not in df.columns: df[c]=""
-                    df=df[MIC_SERIES_COLUMNS].fillna("")
-                    return df, f"Pasted {len(df)} MIC observation row(s)."
+                    raw = str(text).strip()
+
+                    # Excel/Google Sheets clipboard data is normally tab-separated.
+                    try:
+                        df = pd.read_csv(StringIO(raw), sep="\t", header=0)
+                    except Exception:
+                        df = pd.read_csv(StringIO(raw), sep=None, engine="python", header=0)
+
+                    try:
+                        df = _normalise_mic_dataframe(df)
+                    except ValueError:
+                        # Also support headerless pasted rows in the exact five-column order.
+                        df = pd.read_csv(StringIO(raw), sep="\t", header=None)
+                        if len(df.columns) == 1:
+                            df = pd.read_csv(StringIO(raw), sep=None, engine="python", header=None)
+                        if len(df.columns) != 5:
+                            raise
+                        df.columns = MIC_SERIES_COLUMNS
+                        df = _normalise_mic_dataframe(df)
+
+                    return df, f"✅ Pasted {len(df)} MIC observation row(s)."
                 except Exception as e:
-                    return pd.DataFrame(columns=MIC_SERIES_COLUMNS), f"Pasted MIC data could not be read: {e}"
+                    return pd.DataFrame(columns=MIC_SERIES_COLUMNS), f"❌ Pasted MIC data could not be read: {e}"
 
             mic_file_button.click(load_mic_file,mic_file,[mic_series,mic_file_message])
+            mic_file.change(load_mic_file,mic_file,[mic_series,mic_file_message])
             mic_paste_button.click(parse_pasted_mic,mic_paste,[mic_series,mic_paste_message])
             mic_calc.click(calculate_mic_series,[mic_series],[mic_results,mic_message])
 
