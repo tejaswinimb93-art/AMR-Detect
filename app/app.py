@@ -252,6 +252,44 @@ def load_ast_csv(csv_file):
         return pd.DataFrame(columns=columns), f"CSV could not be loaded: {e}"
 
 
+
+def add_metadata(data, sample_id, temperature, ph, antibiotic, mic, ast, other):
+    columns=["Sample ID","Temperature","pH","Antibiotic","MIC","AST","Other information"]
+    try:
+        df=data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(columns=columns)
+        if df.empty: df=pd.DataFrame(columns=columns)
+        for col in columns:
+            if col not in df.columns: df[col]=""
+        sample_id=str(sample_id).strip()
+        if not sample_id:
+            return df[columns], "Please enter a Sample ID."
+        if str(temperature).strip():
+            try: float(temperature)
+            except ValueError: return df[columns], "Temperature must be numeric."
+        if str(ph).strip():
+            try: float(ph)
+            except ValueError: return df[columns], "pH must be numeric."
+        row={"Sample ID":sample_id,"Temperature":str(temperature).strip(),"pH":str(ph).strip(),"Antibiotic":str(antibiotic).strip(),"MIC":str(mic).strip(),"AST":str(ast).strip(),"Other information":str(other).strip()}
+        df=pd.concat([df,pd.DataFrame([row])],ignore_index=True)
+        return df[columns], f"Added experimental metadata for {sample_id}."
+    except Exception as e:
+        return data, f"Could not add metadata: {e}"
+
+
+def load_metadata_csv(csv_file):
+    columns=["Sample ID","Temperature","pH","Antibiotic","MIC","AST","Other information"]
+    if not csv_file:
+        return pd.DataFrame(columns=columns), "No CSV file selected."
+    try:
+        df=pd.read_csv(csv_file)
+        aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","temperature":"Temperature","temp":"Temperature","Temperature (C)":"Temperature","pH":"pH","ph":"pH","antibiotic":"Antibiotic","MIC":"MIC","mic":"MIC","AST":"AST","ast":"AST","notes":"Other information","Other Information":"Other information"}
+        df=df.rename(columns={c:aliases.get(c,c) for c in df.columns})
+        for col in columns:
+            if col not in df.columns: df[col]=""
+        return df[columns].copy(), f"Loaded {len(df)} metadata row(s) from CSV."
+    except Exception as e:
+        return pd.DataFrame(columns=columns), f"CSV could not be loaded: {e}"
+
 def compare_samples(data):
     if data is None: return pd.DataFrame(columns=COMPARISON_COLUMNS)
     try:
@@ -396,8 +434,30 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
 
             gr.Markdown("**Example:** 0.125 µg/mL → Growth; 0.25 → Growth; 0.5 → Growth; 1 → No growth. AMRIVA reports the MIC as 1 µg/mL based on the supplied observations. Clinical AST interpretation still requires the appropriate organism-, drug- and standard-specific breakpoint information.")
         with gr.Tab("🌡️ Experimental Metadata"):
-            gr.Markdown("## Experimental Metadata\nAdd laboratory/research information such as pH and temperature. AMRIVA does not determine these values from FASTA.")
-            meta=gr.Dataframe(headers=["Sample ID","Temperature","pH","Antibiotic","MIC","AST","Other information"],interactive=True,wrap=True)
+            gr.Markdown("## 🌡️ Experimental Metadata")
+            gr.Markdown("Add laboratory/research information such as **pH and temperature**. AMRIVA does not determine these values from FASTA. These values can later be linked to the same Sample ID in Comparative Analysis.")
+
+            gr.Markdown("### 1️⃣ Quick entry — single or repeated samples")
+            with gr.Row():
+                meta_sample=gr.Textbox(label="Sample ID",placeholder="e.g. AMR-001")
+                meta_temp=gr.Textbox(label="Temperature (°C)",placeholder="e.g. 37")
+                meta_ph=gr.Textbox(label="pH",placeholder="e.g. 7.0")
+            with gr.Row():
+                meta_antibiotic=gr.Textbox(label="Antibiotic",placeholder="Optional")
+                meta_mic=gr.Textbox(label="MIC",placeholder="Optional")
+                meta_ast=gr.Dropdown(["Susceptible","Intermediate","Resistant","Not provided"],value="Not provided",label="AST")
+            meta_other=gr.Textbox(label="Other experimental/sample information",placeholder="Optional")
+            meta_add=gr.Button("＋ Add Experimental Data",variant="primary")
+            meta_message=gr.Markdown()
+            meta=gr.Dataframe(headers=["Sample ID","Temperature","pH","Antibiotic","MIC","AST","Other information"],value=[],datatype=["str"]*7,interactive=True,wrap=True,label="Experimental metadata — add as many samples as needed")
+            meta_add.click(add_metadata,[meta,meta_sample,meta_temp,meta_ph,meta_antibiotic,meta_mic,meta_ast,meta_other],[meta,meta_message])
+
+            gr.Markdown("### 2️⃣ Multiple-sample upload")
+            gr.Markdown("Upload a CSV containing **any number of samples**. Recommended columns: `Sample ID, Temperature, pH, Antibiotic, MIC, AST, Other information`.")
+            meta_csv=gr.File(label="Upload experimental metadata CSV",file_types=[".csv"],type="filepath")
+            meta_csv_button=gr.Button("📥 Load Multiple-Sample Metadata")
+            meta_csv_message=gr.Markdown()
+            meta_csv_button.click(load_metadata_csv,meta_csv,[meta,meta_csv_message])
         with gr.Tab("⭐ Comparative Analysis"):
             gr.Markdown("## ⭐ Comparative Analysis\nCombine genomic findings, AST, MIC, pH and temperature to compare samples.")
             ci=gr.Dataframe(headers=COMPARISON_COLUMNS,value=[["","","","","","","",""]],interactive=True,wrap=True); cb=gr.Button("⭐ Run Comparative Analysis",variant="primary"); co=gr.Dataframe(label="Comparative Results",interactive=False,wrap=True); cs=gr.Markdown()
@@ -410,6 +470,11 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             gd=gr.Dataframe(headers=["Sample ID","AMR Finding","Antibiotic","MIC","AST","pH","Temperature"],interactive=True,wrap=True)
             g1b=gr.Button("📊 Generate MIC Comparison"); g1=gr.Plot(label="MIC Comparison"); g1b.click(make_mic_plot,gd,g1)
             g2b=gr.Button("📈 Generate MIC vs pH"); g2=gr.Plot(label="MIC vs pH"); g2b.click(make_mic_ph_plot,gd,g2)
+        with gr.Tab("🤖 AMRIVA Research Assistant"):
+            gr.Markdown("## 🤖 AMRIVA Research Assistant")
+            gr.Markdown("The planned assistant will explain AMRIVA results in plain language using the entered genomic, AST/MIC and experimental data. It will **not diagnose patients, prescribe antibiotics, or replace laboratory interpretation**.")
+            ai_question=gr.Textbox(label="Ask about AMR, MIC, AST or your analysis",placeholder="e.g. What does MIC mean?")
+            gr.Markdown("**AI assistant integration is reserved for the next build step so that it can be connected safely without exposing patient-identifying information or hard-coding an API key.**")
         with gr.Tab("👩‍🔬 Women's Health & AMR"): gr.Markdown(WOMEN)
         with gr.Tab("📚 Methodology"): gr.Markdown(METHOD)
         with gr.Tab("⚠️ Limitations"): gr.Markdown(LIMITS)
