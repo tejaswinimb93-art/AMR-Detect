@@ -257,6 +257,54 @@ def load_ast_csv(csv_file):
 
 
 
+def parse_pasted_ast_data(pasted_text):
+    columns=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison","Other information"]
+    if not pasted_text or not str(pasted_text).strip():
+        return pd.DataFrame(columns=columns), "Nothing was pasted."
+    try:
+        # Excel copy/paste normally produces tab-separated rows. Accept tabs, commas,
+        # or semicolons so users can paste from common spreadsheet exports.
+        text=str(pasted_text).strip()
+        from io import StringIO
+        try:
+            pasted=pd.read_csv(StringIO(text), sep="\t")
+            if len(pasted.columns) == 1:
+                pasted=pd.read_csv(StringIO(text), sep=None, engine="python")
+        except Exception:
+            pasted=pd.read_csv(StringIO(text), sep=None, engine="python")
+        aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID",
+                 "antibiotic":"Antibiotic","Antibiotic":"Antibiotic","MIC":"MIC","mic":"MIC",
+                 "MIC unit":"MIC unit","mic_unit":"MIC unit","Unit":"MIC unit","unit":"MIC unit",
+                 "AST":"AST","ast":"AST","AST result":"AST","pH":"pH","ph":"pH",
+                 "temperature":"Temperature","temp":"Temperature","AMR Finding":"AMR Finding",
+                 "amr_finding":"AMR Finding","Other information":"Other information","Notes":"Other information","notes":"Other information"}
+        pasted=pasted.rename(columns={c:aliases.get(str(c).strip(),str(c).strip()) for c in pasted.columns})
+        # If the pasted spreadsheet has no header row, use the documented column order.
+        if not any(c in pasted.columns for c in ["Sample ID","Antibiotic","MIC"]):
+            pasted=pd.read_csv(StringIO(text), sep="\t", header=None)
+            pasted.columns=(['Sample ID','Antibiotic','MIC','MIC unit','AST','pH','Temperature','Other information'][:len(pasted.columns)])
+        for col in columns:
+            if col not in pasted.columns: pasted[col]=""
+        pasted=pasted[columns].copy().fillna("")
+        return pasted, f"Pasted {len(pasted)} AST/MIC row(s)."
+    except Exception as e:
+        return pd.DataFrame(columns=columns), f"Pasted data could not be read: {e}"
+
+
+def merge_ast_sources(file_df, paste_df):
+    columns=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison","Other information"]
+    frames=[]
+    for df in (file_df,paste_df):
+        if isinstance(df,pd.DataFrame) and not df.empty:
+            x=df.copy()
+            for c in columns:
+                if c not in x.columns: x[c]=""
+            frames.append(x[columns])
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(frames,ignore_index=True).fillna("")
+
+
 def add_metadata(data, sample_id, temperature, ph, antibiotic, mic, ast, other):
     columns=["Sample ID","Temperature","pH","Antibiotic","MIC","AST","Other information"]
     try:
@@ -563,31 +611,80 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
                 [ast_table,ast_message]
             )
 
-            gr.Markdown("### 2️⃣ Multiple-sample upload")
-            gr.Markdown("For many laboratory results, upload a **CSV or Excel file** with **any number of samples and antibiotics**. Recommended columns: `Sample ID, Antibiotic, MIC, MIC unit, AST, pH, Temperature, Other information`. One Sample ID can appear in unlimited antibiotic rows.")
-            ast_csv=gr.File(label="Upload AST/MIC CSV or Excel",file_types=[".csv",".xlsx",".xls"],type="filepath")
-            ast_csv_button=gr.Button("📥 Load Multiple-Sample CSV")
+            gr.Markdown("### 2️⃣ Multiple-sample upload or spreadsheet paste")
+            gr.Markdown("For many laboratory results, you can **upload CSV/Excel** or **copy-paste rows directly from Excel/Google Sheets**. One Sample ID can appear in unlimited antibiotic rows.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    ast_csv=gr.File(label="📁 Upload AST/MIC CSV or Excel",file_types=[".csv",".xlsx",".xls"],type="filepath")
+                    ast_csv_button=gr.Button("📥 Load Uploaded File",variant="primary")
+                    ast_paste=gr.Textbox(label="📋 Paste AST/MIC rows from Excel",placeholder="Copy cells from Excel and paste here. Header row is recommended.",lines=7)
+                    ast_paste_button=gr.Button("📋 Load Pasted Rows")
+                with gr.Column(scale=2):
+                    ast_upload_preview=gr.Dataframe(headers=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison","Other information"],interactive=False,wrap=True,label="Uploaded / pasted result preview")
             ast_csv_message=gr.Markdown()
+            ast_paste_message=gr.Markdown()
+            ast_csv_button.click(load_ast_csv,ast_csv,[ast_upload_preview,ast_csv_message])
             ast_csv_button.click(load_ast_csv,ast_csv,[ast_table,ast_csv_message])
+            ast_paste_button.click(parse_pasted_ast_data,ast_paste,[ast_upload_preview,ast_paste_message])
+            ast_paste_button.click(parse_pasted_ast_data,ast_paste,[ast_table,ast_paste_message])
 
             gr.Markdown("### 3️⃣ MIC concentration series")
-            gr.Markdown("Enter the **experimentally observed growth/no-growth result at each tested concentration**. AMRIVA identifies the lowest tested concentration recorded as `No growth`. It does not independently label the sample Susceptible/Intermediate/Resistant.")
-            mic_series=gr.Dataframe(
-                headers=MIC_SERIES_COLUMNS,
-                value=[],
-                datatype=["str"]*5,
-                interactive=True,
-                wrap=True,
-                label="MIC observations — supports multiple samples"
-            )
+            gr.Markdown("Enter experimentally observed **Growth / No growth** at each tested concentration. You can type into the table, paste spreadsheet rows, or upload CSV/Excel. AMRIVA reports the lowest tested concentration recorded as No growth and does not independently label Susceptible/Intermediate/Resistant.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    mic_file=gr.File(label="📁 Upload MIC series CSV or Excel",file_types=[".csv",".xlsx",".xls"],type="filepath")
+                    mic_file_button=gr.Button("📥 Load MIC File",variant="primary")
+                    mic_paste=gr.Textbox(label="📋 Paste MIC series from Excel",placeholder="Sample ID<TAB>Antibiotic<TAB>Concentration<TAB>Unit<TAB>Growth",lines=7)
+                    mic_paste_button=gr.Button("📋 Load Pasted MIC Rows")
+                with gr.Column(scale=2):
+                    mic_series=gr.Dataframe(headers=MIC_SERIES_COLUMNS,value=[],datatype=["str"]*5,interactive=True,wrap=True,label="MIC observations — supports multiple samples")
+
+            mic_file_message=gr.Markdown()
+            mic_paste_message=gr.Markdown()
             mic_calc=gr.Button("🔬 Calculate MIC from Observations",variant="primary")
             mic_message=gr.Markdown()
-            mic_results=gr.Dataframe(
-                headers=["Sample ID","Antibiotic","MIC","Unit","Lowest no-growth concentration","Interpretation note"],
-                interactive=False,
-                wrap=True,
-                label="Calculated MIC results"
-            )
+            mic_results=gr.Dataframe(headers=["Sample ID","Antibiotic","MIC","Unit","Lowest no-growth concentration","Interpretation note"],interactive=False,wrap=True,label="Calculated MIC results")
+
+            def load_mic_file(path):
+                if not path:
+                    return pd.DataFrame(columns=MIC_SERIES_COLUMNS), "No MIC file selected."
+                try:
+                    ext=os.path.splitext(path)[1].lower()
+                    df=pd.read_excel(path) if ext in {".xlsx",".xls"} else pd.read_csv(path)
+                    aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID",
+                             "antibiotic":"Antibiotic","Antibiotic":"Antibiotic","concentration":"Concentration",
+                             "Concentration":"Concentration","conc":"Concentration","unit":"Unit","Unit":"Unit",
+                             "growth":"Growth","Growth":"Growth","Observation":"Growth","observation":"Growth"}
+                    df=df.rename(columns={c:aliases.get(str(c).strip(),str(c).strip()) for c in df.columns})
+                    for c in MIC_SERIES_COLUMNS:
+                        if c not in df.columns: df[c]=""
+                    df=df[MIC_SERIES_COLUMNS].fillna("")
+                    return df, f"Loaded {len(df)} MIC observation row(s)."
+                except Exception as e:
+                    return pd.DataFrame(columns=MIC_SERIES_COLUMNS), f"MIC file could not be loaded: {e}"
+
+            def parse_pasted_mic(text):
+                if not text or not str(text).strip():
+                    return pd.DataFrame(columns=MIC_SERIES_COLUMNS), "Nothing was pasted."
+                try:
+                    from io import StringIO
+                    raw=str(text).strip()
+                    df=pd.read_csv(StringIO(raw),sep="\t")
+                    if len(df.columns)==1: df=pd.read_csv(StringIO(raw),sep=None,engine="python")
+                    aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","antibiotic":"Antibiotic","Antibiotic":"Antibiotic","concentration":"Concentration","Concentration":"Concentration","conc":"Concentration","unit":"Unit","Unit":"Unit","growth":"Growth","Growth":"Growth","Observation":"Growth","observation":"Growth"}
+                    df=df.rename(columns={c:aliases.get(str(c).strip(),str(c).strip()) for c in df.columns})
+                    if not any(c in df.columns for c in ["Sample ID","Antibiotic","Concentration","Growth"]):
+                        df=pd.read_csv(StringIO(raw),sep="\t",header=None)
+                        df.columns=MIC_SERIES_COLUMNS[:len(df.columns)]
+                    for c in MIC_SERIES_COLUMNS:
+                        if c not in df.columns: df[c]=""
+                    df=df[MIC_SERIES_COLUMNS].fillna("")
+                    return df, f"Pasted {len(df)} MIC observation row(s)."
+                except Exception as e:
+                    return pd.DataFrame(columns=MIC_SERIES_COLUMNS), f"Pasted MIC data could not be read: {e}"
+
+            mic_file_button.click(load_mic_file,mic_file,[mic_series,mic_file_message])
+            mic_paste_button.click(parse_pasted_mic,mic_paste,[mic_series,mic_paste_message])
             mic_calc.click(calculate_mic_series,[mic_series],[mic_results,mic_message])
 
             gr.Markdown("**Example:** 0.125 µg/mL → Growth; 0.25 → Growth; 0.5 → Growth; 1 → No growth. AMRIVA reports the MIC as 1 µg/mL based on the supplied observations. Clinical AST interpretation still requires the appropriate organism-, drug- and standard-specific breakpoint information.")
