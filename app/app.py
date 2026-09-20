@@ -553,6 +553,33 @@ def build_comparative_analysis(genomic_data, ast_data, metadata_data):
                 return "Insufficient data"
             keywords = CLASS_KEYWORDS.get(antibiotic, [antibiotic] if antibiotic else [])
             relevant = any(k and k in evidence for k in keywords)
+
+            # Also recognize common AMRFinderPlus gene/family names that imply
+            # resistance to the same antibiotic class. This is a screening-level
+            # genotype/phenotype comparison, not a clinical susceptibility call.
+            gene_class_keywords = {
+                "ciprofloxacin": ["gyrA", "parC", "qnr", "aac(6')-Ib-cr", "quinolone"],
+                "levofloxacin": ["gyrA", "parC", "qnr", "quinolone"],
+                "moxifloxacin": ["gyrA", "parC", "qnr", "quinolone"],
+                "ampicillin": ["blaTEM", "blaSHV", "blaCTX-M", "blaOXA", "penicillinase", "beta-lactam"],
+                "amoxicillin": ["blaTEM", "blaSHV", "blaCTX-M", "blaOXA", "beta-lactam"],
+                "ceftriaxone": ["blaCTX-M", "blaSHV", "blaTEM", "blaCMY", "cephalosporin", "beta-lactam"],
+                "cefotaxime": ["blaCTX-M", "blaSHV", "blaTEM", "blaCMY", "cephalosporin", "beta-lactam"],
+                "meropenem": ["blaNDM", "blaKPC", "blaVIM", "blaIMP", "blaOXA-48", "carbapenem"],
+                "imipenem": ["blaNDM", "blaKPC", "blaVIM", "blaIMP", "blaOXA-48", "carbapenem"],
+                "gentamicin": ["aac", "aph", "ant", "aminoglycoside"],
+                "amikacin": ["aac", "aph", "ant", "aminoglycoside"],
+                "tetracycline": ["tet", "tetracycline"],
+                "doxycycline": ["tet", "tetracycline"],
+                "trimethoprim": ["dfr", "trimethoprim"],
+                "sulfamethoxazole": ["sul", "sulfamethoxazole", "sulfonamide"],
+                "vancomycin": ["vanA", "vanB", "vancomycin"],
+                "erythromycin": ["erm", "macrolide"],
+                "azithromycin": ["erm", "macrolide"],
+            }
+            gene_keywords = gene_class_keywords.get(antibiotic, [])
+            relevant = relevant or any(k.lower() in evidence for k in gene_keywords)
+
             if not relevant:
                 return "Requires interpretation"
             if ast == "resistant":
