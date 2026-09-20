@@ -513,18 +513,54 @@ def build_comparative_analysis(genomic_data, ast_data, metadata_data):
         if "Other information" not in base.columns: base["Other information"] = ""
         if "MIC unit" not in base.columns: base["MIC unit"] = ""
 
-        # Comparison is deliberately conservative: only classify when an AST result and
-        # a clearly relevant genomic finding are both present. Presence of any AMR gene
-        # is not automatically evidence of resistance to every antibiotic.
+        # Conservative comparison: only flag a possible genotype/phenotype relationship
+        # when the genomic result contains a recognizable antibiotic/class keyword.
+        # This is a screening aid, not a clinical susceptibility call.
+        CLASS_KEYWORDS = {
+            "ciprofloxacin": ["fluoroquinolone", "quinolone", "ciprofloxacin"],
+            "levofloxacin": ["fluoroquinolone", "quinolone", "levofloxacin"],
+            "moxifloxacin": ["fluoroquinolone", "quinolone", "moxifloxacin"],
+            "ampicillin": ["beta-lactam", "beta lactam", "ampicillin", "penicillin"],
+            "amoxicillin": ["beta-lactam", "beta lactam", "amoxicillin", "penicillin"],
+            "ceftriaxone": ["beta-lactam", "beta lactam", "cephalosporin", "ceftriaxone"],
+            "cefotaxime": ["beta-lactam", "beta lactam", "cephalosporin", "cefotaxime"],
+            "meropenem": ["carbapenem", "beta-lactam", "beta lactam", "meropenem"],
+            "imipenem": ["carbapenem", "beta-lactam", "beta lactam", "imipenem"],
+            "gentamicin": ["aminoglycoside", "gentamicin"],
+            "amikacin": ["aminoglycoside", "amikacin"],
+            "streptomycin": ["aminoglycoside", "streptomycin"],
+            "tetracycline": ["tetracycline", "tet"],
+            "doxycycline": ["tetracycline", "doxycycline"],
+            "trimethoprim": ["trimethoprim", "sulfonamide"],
+            "sulfamethoxazole": ["sulfonamide", "sulfamethoxazole"],
+            "vancomycin": ["vancomycin", "glycopeptide"],
+            "linezolid": ["linezolid", "oxazolidinone"],
+            "erythromycin": ["macrolide", "erythromycin"],
+            "azithromycin": ["macrolide", "azithromycin"],
+            "chloramphenicol": ["chloramphenicol"],
+            "rifampicin": ["rifampin", "rifamycin", "rifampicin"],
+        }
+
         def classify(row):
             finding = str(row.get("AMR Finding", "")).strip().lower()
+            raw_result = str(row.get("AMRFinderPlus result", "")).strip().lower()
+            evidence = f"{finding} {raw_result}"
             ast = str(row.get("AST", "")).strip().lower()
-            antibiotic = str(row.get("Antibiotic", "")).strip()
-            if not ast or ast in {"not provided", "nan", "none"}: return "Insufficient data"
-            if not finding or finding in {"nan", "none", "no known amr determinant detected"}: return "Insufficient data"
-            # Do not claim concordance merely because a determinant exists.
-            if ast == "resistant": return "Requires interpretation"
-            if ast in {"susceptible", "intermediate"}: return "Requires interpretation"
+            antibiotic = str(row.get("Antibiotic", "")).strip().lower()
+            if not ast or ast in {"not provided", "nan", "none", ""}:
+                return "Insufficient data"
+            if not evidence or "no known amr determinant detected" in evidence:
+                return "Insufficient data"
+            keywords = CLASS_KEYWORDS.get(antibiotic, [antibiotic] if antibiotic else [])
+            relevant = any(k and k in evidence for k in keywords)
+            if not relevant:
+                return "Requires interpretation"
+            if ast == "resistant":
+                return "Potentially concordant"
+            if ast == "susceptible":
+                return "Potentially discordant"
+            if ast == "intermediate":
+                return "Requires interpretation"
             return "Insufficient data"
 
         base["Comparison"] = base.apply(classify, axis=1)
@@ -552,11 +588,11 @@ def comparison_summary(data):
     if data is None: return "### No comparison data entered."
     df=data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(data)
     if df.empty: return "### No comparison data entered."
-    c=(df.get("Comparison",pd.Series(dtype=str)).astype(str)=="Concordant").sum()
-    d=(df.get("Comparison",pd.Series(dtype=str)).astype(str)=="Discordant").sum()
+    c=(df.get("Comparison",pd.Series(dtype=str)).astype(str)=="Potentially concordant").sum()
+    d=(df.get("Comparison",pd.Series(dtype=str)).astype(str)=="Potentially discordant").sum()
     i=(df.get("Comparison",pd.Series(dtype=str)).astype(str)=="Insufficient data").sum()
     r=(df.get("Comparison",pd.Series(dtype=str)).astype(str)=="Requires interpretation").sum()
-    return f"### 📊 Summary\n\n**Antibiotic test rows:** {len(df)}\n\n🟢 Concordant: **{c}**  \n🟠 Discordant: **{d}**  \n🟡 Requires interpretation: **{r}**  \n⚪ Insufficient data: **{i}**\n\nAMRIVA does not infer clinical susceptibility from a genomic determinant alone. Concordance/discordance requires appropriate organism-, drug- and standard-specific interpretation."
+    return f"### 📊 Summary\n\n**Antibiotic test rows:** {len(df)}\n\n🟢 Potentially concordant: **{c}**  \n🟠 Potentially discordant: **{d}**  \n🟡 Requires interpretation: **{r}**  \n⚪ Insufficient data: **{i}**\n\nThese are screening-level comparisons only. AMRIVA does not infer clinical susceptibility from a genomic determinant alone; organism-, drug- and standard-specific interpretation remains necessary."
 
 
 def dashboard(data,sample_id):
@@ -831,7 +867,7 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             co=gr.Dataframe(headers=["Sample ID","Detected organism","AMR Finding","AMRFinderPlus result","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"],interactive=False,wrap=True,label="Integrated Genotype–Phenotype Comparison")
             cs=gr.Markdown()
             cb.click(run_comparative,[genomic_state,ast_table,meta],[co,cmsg,cs])
-            gr.Markdown("**Comparison status is conservative:** a genomic determinant is not automatically treated as evidence of resistance to every antibiotic. Appropriate breakpoint and biological interpretation are required.")
+            gr.Markdown("**Comparison status is conservative:** 🟢 Potentially concordant means the supplied genomic evidence contains a recognizable antibiotic/class relationship and the supplied AST says Resistant. 🟠 Potentially discordant means the genomic evidence is relevant but AST says Susceptible. 🟡 Requires interpretation means the relationship cannot be established safely from the supplied data. These are not clinical diagnostic calls.")
         with gr.Tab("📋 Sample Dashboard"):
             gr.Markdown("## 📋 Integrated Sample Dashboard\nEnter a sample ID to view its combined information.")
             dd=gr.Dataframe(headers=COMPARISON_COLUMNS,interactive=True,wrap=True); ds=gr.Textbox(label="Sample ID"); db=gr.Button("📋 View Dashboard",variant="primary"); dout=gr.Markdown(); db.click(dashboard,[dd,ds],dout)
@@ -842,9 +878,29 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             g2b=gr.Button("📈 Generate MIC vs pH"); g2=gr.Plot(label="MIC vs pH"); g2b.click(make_mic_ph_plot,gd,g2)
         with gr.Tab("🤖 AMRIVA Research Assistant"):
             gr.Markdown("## 🤖 AMRIVA Research Assistant")
-            gr.Markdown("The planned assistant will explain AMRIVA results in plain language using the entered genomic, AST/MIC and experimental data. It will **not diagnose patients, prescribe antibiotics, or replace laboratory interpretation**.")
-            ai_question=gr.Textbox(label="Ask about AMR, MIC, AST or your analysis",placeholder="e.g. What does MIC mean?")
-            gr.Markdown("**AI assistant integration is reserved for the next build step so that it can be connected safely without exposing patient-identifying information or hard-coding an API key.**")
+            gr.Markdown("Ask educational questions about AMR, AST, MIC, genomic screening or the AMRIVA workflow. The assistant is educational and does not diagnose patients, prescribe antibiotics or replace laboratory interpretation.")
+            ai_question=gr.Textbox(label="Ask a question",placeholder="e.g. What does MIC mean? Why can genotype and AST disagree?",lines=3)
+            ai_answer=gr.Markdown()
+            def answer_assistant(q):
+                q=str(q or "").strip().lower()
+                if not q: return "Please enter a question."
+                if "mic" in q and "ast" in q:
+                    return "### MIC vs AST\n**MIC** is the lowest tested antimicrobial concentration that prevents visible growth under the test conditions. **AST** reports the susceptibility category or observed susceptibility result. MIC values are interpreted using organism-, drug- and standard-specific breakpoints. AMRIVA records laboratory-provided results; it does not create clinical breakpoints itself."
+                if "mic" in q:
+                    return "### MIC\nMIC means **minimum inhibitory concentration**. In AMRIVA's concentration-series tool, you enter the experimentally observed growth/no-growth result at each tested concentration. AMRIVA reports the lowest tested concentration recorded as no growth. That value is not automatically labelled Susceptible/Intermediate/Resistant."
+                if "ast" in q or "susceptible" in q or "resistant" in q:
+                    return "### AST\nAntimicrobial susceptibility testing is a laboratory process used to determine how an organism responds to antimicrobial agents. AMRIVA accepts the laboratory-generated AST result and links it to the sample's genomic findings."
+                if "genotype" in q or "genomic" in q or "gene" in q:
+                    return "### Genomic AMR screening\nAMRIVA uses AMRFinderPlus to screen sequence data for known resistance determinants. A detected determinant can provide genomic evidence, but it does not automatically prove phenotypic resistance to every antibiotic. Phenotypic AST remains important."
+                if "ph" in q or "temperature" in q:
+                    return "### Experimental metadata\npH and temperature are laboratory/research measurements supplied by the user. AMRIVA does not calculate them from a FASTA sequence. They can be linked to the same Sample ID for comparative analysis."
+                if "compare" in q or "concord" in q or "discord" in q:
+                    return "### Comparative analysis\nAMRIVA brings together genomic findings, AST/MIC and experimental metadata using Sample ID. A potential concordance/discordance flag is only a screening-level indication; proper interpretation requires the organism, antimicrobial, breakpoint standard and laboratory context."
+                if "women" in q or "uti" in q:
+                    return "### Women's Health & AMR\nAMRIVA's Women's Health section is educational/research-focused, including AMR surveillance relevant to urinary and reproductive health. It does not diagnose patient vaginal, urine or blood samples."
+                return "### AMRIVA Research Assistant\nI can explain AMR, genomic AMR screening, AST, MIC, pH/temperature metadata, comparative analysis and the AMRIVA workflow. Try asking: **What is MIC?**, **Why can genotype and AST disagree?**, or **What does AMRFinderPlus do?**"
+            ai_question.submit(answer_assistant, ai_question, ai_answer)
+            gr.Button("💡 Explain").click(answer_assistant, ai_question, ai_answer)
         with gr.Tab("👩‍🔬 Women's Health & AMR"): gr.Markdown(WOMEN)
         with gr.Tab("📚 Methodology"): gr.Markdown(METHOD)
         with gr.Tab("⚠️ Limitations"): gr.Markdown(LIMITS)
