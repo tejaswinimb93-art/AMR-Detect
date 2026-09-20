@@ -134,6 +134,87 @@ def analyse_zip(zip_file):
     finally: shutil.rmtree(folder,ignore_errors=True)
 
 
+
+# ============================================================
+# MIC CONCENTRATION-SERIES ANALYSIS
+# ============================================================
+
+MIC_SERIES_COLUMNS = [
+    "Sample ID", "Antibiotic", "Concentration", "Unit", "Growth"
+]
+
+def calculate_mic_series(data):
+    """Determine the lowest tested concentration marked as No growth.
+
+    This uses only the laboratory observations supplied by the user.
+    It does not assign Susceptible/Intermediate/Resistant categories.
+    """
+    out_columns = [
+        "Sample ID", "Antibiotic", "MIC", "Unit",
+        "Lowest no-growth concentration", "Interpretation note"
+    ]
+    empty = pd.DataFrame(columns=out_columns)
+    if data is None:
+        return empty, "No MIC observations entered."
+    try:
+        df = data.copy() if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        if df.empty:
+            return empty, "No MIC observations entered."
+
+        for col in MIC_SERIES_COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+        df = df[MIC_SERIES_COLUMNS].copy()
+        df["Concentration_num"] = pd.to_numeric(df["Concentration"], errors="coerce")
+        df["Growth_clean"] = df["Growth"].astype(str).str.strip().str.lower()
+
+        results = []
+        for (sample, antibiotic), group in df.groupby(
+            ["Sample ID", "Antibiotic"], dropna=False, sort=False
+        ):
+            group = group.dropna(subset=["Concentration_num"])
+            group = group[group["Concentration_num"] >= 0]
+            if group.empty:
+                results.append({
+                    "Sample ID": str(sample),
+                    "Antibiotic": str(antibiotic),
+                    "MIC": "Not determined",
+                    "Unit": "",
+                    "Lowest no-growth concentration": "",
+                    "Interpretation note": "No valid numeric concentrations were supplied."
+                })
+                continue
+
+            no_growth = group[group["Growth_clean"].isin(
+                ["no", "no growth", "nogrowth", "absent", "none"]
+            )]
+            unit_values = group["Unit"].astype(str).str.strip()
+            unit = next((u for u in unit_values if u and u.lower() != "nan"), "")
+
+            if no_growth.empty:
+                mic_text = "Not determined"
+                lowest_text = "No no-growth observation"
+                note = "No tested concentration was entered as No growth."
+            else:
+                mic = float(no_growth["Concentration_num"].min())
+                mic_text = f"{mic:g} {unit}".strip()
+                lowest_text = mic_text
+                note = "MIC calculated as the lowest tested concentration recorded as No growth."
+
+            results.append({
+                "Sample ID": str(sample),
+                "Antibiotic": str(antibiotic),
+                "MIC": mic_text,
+                "Unit": unit,
+                "Lowest no-growth concentration": lowest_text,
+                "Interpretation note": note
+            })
+
+        result_df = pd.DataFrame(results, columns=out_columns)
+        return result_df, f"Calculated MIC information for {len(result_df)} sample/antibiotic combination(s)."
+    except Exception as e:
+        return empty, f"MIC series could not be analysed: {e}"
+
 def add_ast_result(data, sample_id, antibiotic, mic, unit, ast_result, notes):
     columns=["Sample ID","AMR Finding","Antibiotic","MIC","AST","pH","Temperature","Comparison"]
     try:
@@ -258,8 +339,10 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             bz=gr.File(label="Upload ZIP containing FASTA files",file_types=[".zip"],type="filepath"); bb=gr.Button("📊 Analyse All Samples",variant="primary")
             bt=gr.Dataframe(headers=["Sample ID","Detected organism","FASTA file","Sequence length","GC content","AMR status","AMRFinderPlus result","Interpretation"],interactive=False,wrap=True); bb.click(analyse_zip,bz,bt)
         with gr.Tab("🧪 AST + MIC"):
-            gr.Markdown("## 🧪 Phenotypic AST & MIC Data\n\nEnter **laboratory-generated** susceptibility results. AMRIVA does not perform the wet-lab test or infer AST/MIC from a FASTA sequence.")
-            gr.Markdown("### Quick entry")
+            gr.Markdown("## 🧪 Phenotypic AST & MIC Data")
+            gr.Markdown("Enter **laboratory-generated** susceptibility results. AMRIVA does not perform the wet-lab test or infer AST/MIC from a FASTA sequence.")
+
+            gr.Markdown("### 1️⃣ Quick entry — single or repeated samples")
             with gr.Row():
                 ast_sample=gr.Textbox(label="Sample ID",placeholder="e.g. AMR-001")
                 ast_antibiotic=gr.Textbox(label="Antibiotic",placeholder="e.g. Ciprofloxacin")
@@ -270,14 +353,48 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
                 ast_notes=gr.Textbox(label="Experimental notes",placeholder="Optional")
             ast_add=gr.Button("＋ Add AST/MIC Result",variant="primary")
             ast_message=gr.Markdown()
-            ast_table=gr.Dataframe(headers=COMPARISON_COLUMNS,value=[["","","","","","","",""]],interactive=True,wrap=True,label="AST/MIC results")
-            ast_add.click(add_ast_result,[ast_table,ast_sample,ast_antibiotic,ast_mic,ast_unit,ast_result,ast_notes],[ast_table,ast_message])
-            gr.Markdown("### 📄 Upload AST/MIC results from a spreadsheet")
-            gr.Markdown("Use CSV columns such as `Sample ID, Antibiotic, MIC, AST, pH, Temperature`. This avoids entering every laboratory result manually.")
+            ast_table=gr.Dataframe(
+                headers=COMPARISON_COLUMNS,
+                value=[],
+                datatype=["str"]*8,
+                interactive=True,
+                wrap=True,
+                label="AST/MIC results — add as many samples/antibiotics as needed"
+            )
+            ast_add.click(
+                add_ast_result,
+                [ast_table,ast_sample,ast_antibiotic,ast_mic,ast_unit,ast_result,ast_notes],
+                [ast_table,ast_message]
+            )
+
+            gr.Markdown("### 2️⃣ Multiple-sample upload")
+            gr.Markdown("For many laboratory results, upload a CSV with **any number of samples and antibiotics**. Recommended columns: `Sample ID, Antibiotic, MIC, AST, pH, Temperature`. AMRIVA does not limit the number of rows to two or three.")
             ast_csv=gr.File(label="Upload AST/MIC CSV",file_types=[".csv"],type="filepath")
-            ast_csv_button=gr.Button("📥 Load CSV")
+            ast_csv_button=gr.Button("📥 Load Multiple-Sample CSV")
             ast_csv_message=gr.Markdown()
             ast_csv_button.click(load_ast_csv,ast_csv,[ast_table,ast_csv_message])
+
+            gr.Markdown("### 3️⃣ MIC concentration series")
+            gr.Markdown("Enter the **experimentally observed growth/no-growth result at each tested concentration**. AMRIVA identifies the lowest tested concentration recorded as `No growth`. It does not independently label the sample Susceptible/Intermediate/Resistant.")
+            mic_series=gr.Dataframe(
+                headers=MIC_SERIES_COLUMNS,
+                value=[],
+                datatype=["str"]*5,
+                interactive=True,
+                wrap=True,
+                label="MIC observations — supports multiple samples"
+            )
+            mic_calc=gr.Button("🔬 Calculate MIC from Observations",variant="primary")
+            mic_message=gr.Markdown()
+            mic_results=gr.Dataframe(
+                headers=["Sample ID","Antibiotic","MIC","Unit","Lowest no-growth concentration","Interpretation note"],
+                interactive=False,
+                wrap=True,
+                label="Calculated MIC results"
+            )
+            mic_calc.click(calculate_mic_series,[mic_series],[mic_results,mic_message])
+
+            gr.Markdown("**Example:** 0.125 µg/mL → Growth; 0.25 → Growth; 0.5 → Growth; 1 → No growth. AMRIVA reports the MIC as 1 µg/mL based on the supplied observations. Clinical AST interpretation still requires the appropriate organism-, drug- and standard-specific breakpoint information.")
         with gr.Tab("🌡️ Experimental Metadata"):
             gr.Markdown("## Experimental Metadata\nAdd laboratory/research information such as pH and temperature. AMRIVA does not determine these values from FASTA.")
             meta=gr.Dataframe(headers=["Sample ID","Temperature","pH","Antibiotic","MIC","AST","Other information"],interactive=True,wrap=True)
