@@ -24,7 +24,7 @@ ORGANISM_MAP = {
     "vibrio vulnificus":"Vibrio_vulnificus"
 }
 
-COMPARISON_COLUMNS = ["Sample ID","AMR Finding","Antibiotic","MIC","AST","pH","Temperature","Comparison"]
+COMPARISON_COLUMNS = ["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison"]
 
 
 def read_fasta(filepath):
@@ -216,7 +216,7 @@ def calculate_mic_series(data):
         return empty, f"MIC series could not be analysed: {e}"
 
 def add_ast_result(data, sample_id, antibiotic, mic, unit, ast_result, notes):
-    columns=["Sample ID","AMR Finding","Antibiotic","MIC","AST","pH","Temperature","Comparison"]
+    columns=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison"]
     try:
         df=data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(columns=columns)
         if df.empty: df=pd.DataFrame(columns=columns)
@@ -229,7 +229,7 @@ def add_ast_result(data, sample_id, antibiotic, mic, unit, ast_result, notes):
             float(mic)
         except ValueError:
             return df, "MIC must be a numeric value."
-        row={"Sample ID":str(sample_id).strip(),"AMR Finding":"","Antibiotic":str(antibiotic).strip(),"MIC":f"{str(mic).strip()} {unit}".strip(),"AST":str(ast_result).strip(),"pH":"","Temperature":"","Comparison":"","Notes":str(notes).strip()}
+        row={"Sample ID":str(sample_id).strip(),"AMR Finding":"","Antibiotic":str(antibiotic).strip(),"MIC":str(mic).strip(),"MIC unit":str(unit).strip(),"AST":str(ast_result).strip(),"pH":"","Temperature":"","Comparison":"","Other information":str(notes).strip()}
         df=pd.concat([df,pd.DataFrame([row])],ignore_index=True)
         return df[columns], f"Added AST/MIC result for {sample_id}."
     except Exception as e:
@@ -237,12 +237,12 @@ def add_ast_result(data, sample_id, antibiotic, mic, unit, ast_result, notes):
 
 
 def load_ast_csv(csv_file):
-    columns=["Sample ID","AMR Finding","Antibiotic","MIC","AST","pH","Temperature","Comparison"]
+    columns=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison"]
     if not csv_file:
         return pd.DataFrame(columns=columns), "No CSV file selected."
     try:
         df=pd.read_csv(csv_file)
-        aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","antibiotic":"Antibiotic","MIC":"MIC","mic":"MIC","AST":"AST","ast":"AST","pH":"pH","ph":"pH","temperature":"Temperature","temp":"Temperature","AMR Finding":"AMR Finding","amr_finding":"AMR Finding"}
+        aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","antibiotic":"Antibiotic","MIC":"MIC","mic":"MIC","MIC unit":"MIC unit","mic_unit":"MIC unit","Unit":"MIC unit","unit":"MIC unit","AST":"AST","ast":"AST","pH":"pH","ph":"pH","temperature":"Temperature","temp":"Temperature","AMR Finding":"AMR Finding","amr_finding":"AMR Finding"}
         df=df.rename(columns={c:aliases.get(c,c) for c in df.columns})
         for col in columns:
             if col not in df.columns: df[col]=""
@@ -282,7 +282,7 @@ def load_metadata_csv(csv_file):
         return pd.DataFrame(columns=columns), "No CSV file selected."
     try:
         df=pd.read_csv(csv_file)
-        aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","temperature":"Temperature","temp":"Temperature","Temperature (C)":"Temperature","pH":"pH","ph":"pH","antibiotic":"Antibiotic","MIC":"MIC","mic":"MIC","AST":"AST","ast":"AST","notes":"Other information","Other Information":"Other information"}
+        aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","temperature":"Temperature","temp":"Temperature","Temperature (C)":"Temperature","pH":"pH","ph":"pH","antibiotic":"Antibiotic","MIC":"MIC","mic":"MIC","MIC unit":"MIC unit","mic_unit":"MIC unit","Unit":"MIC unit","unit":"MIC unit","AST":"AST","ast":"AST","notes":"Other information","Other Information":"Other information"}
         df=df.rename(columns={c:aliases.get(c,c) for c in df.columns})
         for col in columns:
             if col not in df.columns: df[col]=""
@@ -319,7 +319,7 @@ def _normalise_columns(df, aliases):
 
 
 def build_comparative_analysis(genomic_data, ast_data, metadata_data):
-    columns = ["Sample ID","Detected organism","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"]
+    columns = ["Sample ID","Detected organism","AMR Finding","AMRFinderPlus result","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"]
     empty = pd.DataFrame(columns=columns)
     try:
         g = _normalise_columns(genomic_data, {
@@ -351,31 +351,51 @@ def build_comparative_analysis(genomic_data, ast_data, metadata_data):
         for c in ["Sample ID","Antibiotic","MIC","MIC unit","AST","Other information"]:
             if c not in base.columns: base[c] = ""
 
-        # Add sample-level metadata by Sample ID. If metadata contains an antibiotic,
-        # prefer an exact Sample ID + Antibiotic match where available.
+        # Add sample-level metadata by Sample ID. Metadata can be sample-level
+        # (blank antibiotic) or antibiotic-specific. Blank values in the AST table
+        # are filled from metadata without creating duplicate pH/temperature columns.
         if not m.empty and "Sample ID" in m.columns:
-            for c in ["pH","Temperature"]:
+            for c in ["pH", "Temperature"]:
                 if c not in m.columns: m[c] = ""
+            base["Sample ID"] = base["Sample ID"].astype(str).str.strip()
+            m["Sample ID"] = m["Sample ID"].astype(str).str.strip()
+
             if "Antibiotic" in m.columns and "Antibiotic" in base.columns:
-                mm = m[["Sample ID","Antibiotic","pH","Temperature"]].copy()
-                mm["Sample ID"] = mm["Sample ID"].astype(str).str.strip()
-                mm["Antibiotic"] = mm["Antibiotic"].astype(str).str.strip()
-                base["Sample ID"] = base["Sample ID"].astype(str).str.strip()
+                m["Antibiotic"] = m["Antibiotic"].astype(str).str.strip()
                 base["Antibiotic"] = base["Antibiotic"].astype(str).str.strip()
-                exact = mm[mm["Antibiotic"].ne("")].drop_duplicates(["Sample ID","Antibiotic"])
+
+                exact = m[m["Antibiotic"].ne("")][["Sample ID","Antibiotic","pH","Temperature"]].copy()
+                exact = exact.drop_duplicates(["Sample ID","Antibiotic"], keep="last")
+                exact = exact.rename(columns={"pH":"pH_meta_exact","Temperature":"Temperature_meta_exact"})
                 base = base.merge(exact, on=["Sample ID","Antibiotic"], how="left")
-                # Also apply sample-level metadata rows whose Antibiotic is blank.
-                sample_meta = mm[mm["Antibiotic"].eq("")][["Sample ID","pH","Temperature"]].drop_duplicates("Sample ID")
+
+                sample_meta = m[m["Antibiotic"].eq("")][["Sample ID","pH","Temperature"]].copy()
+                sample_meta = sample_meta.drop_duplicates("Sample ID", keep="last")
+                sample_meta = sample_meta.rename(columns={"pH":"pH_meta_sample","Temperature":"Temperature_meta_sample"})
                 if not sample_meta.empty:
-                    base = base.merge(sample_meta, on="Sample ID", how="left", suffixes=("","_sample"))
-                    base["pH"] = base["pH"].replace("", pd.NA).fillna(base["pH_sample"])
-                    base["Temperature"] = base["Temperature"].replace("", pd.NA).fillna(base["Temperature_sample"])
-                    base.drop(columns=["pH_sample","Temperature_sample"], inplace=True)
+                    base = base.merge(sample_meta, on="Sample ID", how="left")
+
+                for target, candidates in {
+                    "pH":["pH_meta_exact","pH_meta_sample"],
+                    "Temperature":["Temperature_meta_exact","Temperature_meta_sample"]
+                }.items():
+                    if target not in base.columns: base[target] = ""
+                    base[target] = base[target].replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+                    for candidate in candidates:
+                        if candidate in base.columns:
+                            base[target] = base[target].fillna(base[candidate])
+                    base[target] = base[target].fillna("")
+
+                drop_cols=[c for c in ["pH_meta_exact","Temperature_meta_exact","pH_meta_sample","Temperature_meta_sample"] if c in base.columns]
+                if drop_cols: base.drop(columns=drop_cols, inplace=True)
             else:
-                mm = m[["Sample ID","pH","Temperature"]].copy().drop_duplicates("Sample ID")
-                base["Sample ID"] = base["Sample ID"].astype(str).str.strip()
-                mm["Sample ID"] = mm["Sample ID"].astype(str).str.strip()
-                base = base.merge(mm, on="Sample ID", how="left")
+                mm=m[["Sample ID","pH","Temperature"]].drop_duplicates("Sample ID", keep="last").rename(columns={"pH":"pH_meta","Temperature":"Temperature_meta"})
+                base=base.merge(mm,on="Sample ID",how="left")
+                for target,meta_col in [("pH","pH_meta"),("Temperature","Temperature_meta")]:
+                    if target not in base.columns: base[target]=""
+                    if meta_col in base.columns:
+                        base[target]=base[target].replace({"":pd.NA}).fillna(base[meta_col]).fillna("")
+                        base.drop(columns=[meta_col],inplace=True)
 
         if "pH" not in base.columns: base["pH"] = ""
         if "Temperature" not in base.columns: base["Temperature"] = ""
@@ -384,11 +404,15 @@ def build_comparative_analysis(genomic_data, ast_data, metadata_data):
         if not g.empty and "Sample ID" in g.columns:
             g["Sample ID"] = g["Sample ID"].astype(str).str.strip()
             g["AMR Finding"] = g.get("AMR Finding", "")
-            if "AMR Finding" not in g.columns or g["AMR Finding"].astype(str).str.strip().eq("").all():
+            g["AMRFinderPlus result"] = g.get("AMRFinderPlus result", "")
+            if g["AMR Finding"].astype(str).str.strip().eq("").all():
                 status = g.get("AMR status", "").astype(str)
                 result = g.get("AMRFinderPlus result", "").astype(str)
                 g["AMR Finding"] = result.where(~result.str.contains("No known AMR determinant detected", case=False, na=False), "No known AMR determinant detected")
-            keep = [c for c in ["Sample ID","Detected organism","AMR Finding"] if c in g.columns]
+            keep = [c for c in ["Sample ID","Detected organism","AMR Finding","AMRFinderPlus result"] if c in g.columns]
+            for old_col in ["Detected organism","AMR Finding","AMRFinderPlus result"]:
+                if old_col in base.columns:
+                    base.drop(columns=[old_col], inplace=True)
             base = base.merge(g[keep].drop_duplicates("Sample ID"), on="Sample ID", how="left")
         else:
             base["Detected organism"] = ""
@@ -396,6 +420,7 @@ def build_comparative_analysis(genomic_data, ast_data, metadata_data):
 
         if "Detected organism" not in base.columns: base["Detected organism"] = ""
         if "AMR Finding" not in base.columns: base["AMR Finding"] = ""
+        if "AMRFinderPlus result" not in base.columns: base["AMRFinderPlus result"] = ""
         if "Other information" not in base.columns: base["Other information"] = ""
         if "MIC unit" not in base.columns: base["MIC unit"] = ""
 
@@ -521,7 +546,7 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             ast_add=gr.Button("＋ Add AST/MIC Result",variant="primary")
             ast_message=gr.Markdown()
             ast_table=gr.Dataframe(
-                headers=COMPARISON_COLUMNS,
+                headers=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison"],
                 value=[],
                 datatype=["str"]*8,
                 interactive=True,
@@ -594,7 +619,7 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             gr.Markdown("The genomic source comes from the FASTA/ZIP analysis in this browser session. AST/MIC and experimental metadata come from the tables in their respective tabs.")
             cb=gr.Button("⭐ Build Comparative Analysis",variant="primary")
             cmsg=gr.Markdown()
-            co=gr.Dataframe(headers=["Sample ID","Detected organism","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"],interactive=False,wrap=True,label="Integrated Genotype–Phenotype Comparison")
+            co=gr.Dataframe(headers=["Sample ID","Detected organism","AMR Finding","AMRFinderPlus result","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"],interactive=False,wrap=True,label="Integrated Genotype–Phenotype Comparison")
             cs=gr.Markdown()
             cb.click(run_comparative,[genomic_state,ast_table,meta],[co,cmsg,cs])
             gr.Markdown("**Comparison status is conservative:** a genomic determinant is not automatically treated as evidence of resistance to every antibiotic. Appropriate breakpoint and biological interpretation are required.")
