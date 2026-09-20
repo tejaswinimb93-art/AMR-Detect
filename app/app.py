@@ -24,7 +24,7 @@ ORGANISM_MAP = {
     "vibrio vulnificus":"Vibrio_vulnificus"
 }
 
-COMPARISON_COLUMNS = ["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison"]
+COMPARISON_COLUMNS = ["Sample ID","Detected organism","AMR Finding","AMRFinderPlus result","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"]
 
 
 def read_fasta(filepath):
@@ -216,7 +216,7 @@ def calculate_mic_series(data):
         return empty, f"MIC series could not be analysed: {e}"
 
 def add_ast_result(data, sample_id, antibiotic, mic, unit, ast_result, notes):
-    columns=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison"]
+    columns=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison","Other information"]
     try:
         df=data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(columns=columns)
         if df.empty: df=pd.DataFrame(columns=columns)
@@ -237,12 +237,16 @@ def add_ast_result(data, sample_id, antibiotic, mic, unit, ast_result, notes):
 
 
 def load_ast_csv(csv_file):
-    columns=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison"]
+    columns=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison","Other information"]
     if not csv_file:
-        return pd.DataFrame(columns=columns), "No CSV file selected."
+        return pd.DataFrame(columns=columns), "No file selected."
     try:
-        df=pd.read_csv(csv_file)
-        aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","antibiotic":"Antibiotic","MIC":"MIC","mic":"MIC","MIC unit":"MIC unit","mic_unit":"MIC unit","Unit":"MIC unit","unit":"MIC unit","AST":"AST","ast":"AST","pH":"pH","ph":"pH","temperature":"Temperature","temp":"Temperature","AMR Finding":"AMR Finding","amr_finding":"AMR Finding"}
+        ext=os.path.splitext(csv_file)[1].lower()
+        if ext in {".xlsx", ".xls"}:
+            df=pd.read_excel(csv_file)
+        else:
+            df=pd.read_csv(csv_file)
+        aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","antibiotic":"Antibiotic","Antibiotic":"Antibiotic","MIC":"MIC","mic":"MIC","MIC unit":"MIC unit","mic_unit":"MIC unit","Unit":"MIC unit","unit":"MIC unit","AST":"AST","ast":"AST","AST result":"AST","pH":"pH","ph":"pH","temperature":"Temperature","temp":"Temperature","AMR Finding":"AMR Finding","amr_finding":"AMR Finding","Other information":"Other information","Notes":"Other information","notes":"Other information"}
         df=df.rename(columns={c:aliases.get(c,c) for c in df.columns})
         for col in columns:
             if col not in df.columns: df[col]=""
@@ -546,9 +550,9 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             ast_add=gr.Button("＋ Add AST/MIC Result",variant="primary")
             ast_message=gr.Markdown()
             ast_table=gr.Dataframe(
-                headers=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison"],
+                headers=["Sample ID","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Comparison","Other information"],
                 value=[],
-                datatype=["str"]*8,
+                datatype=["str"]*10,
                 interactive=True,
                 wrap=True,
                 label="AST/MIC results — add as many samples/antibiotics as needed"
@@ -560,8 +564,8 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             )
 
             gr.Markdown("### 2️⃣ Multiple-sample upload")
-            gr.Markdown("For many laboratory results, upload a CSV with **any number of samples and antibiotics**. Recommended columns: `Sample ID, Antibiotic, MIC, AST, pH, Temperature`. AMRIVA does not limit the number of rows to two or three.")
-            ast_csv=gr.File(label="Upload AST/MIC CSV",file_types=[".csv"],type="filepath")
+            gr.Markdown("For many laboratory results, upload a **CSV or Excel file** with **any number of samples and antibiotics**. Recommended columns: `Sample ID, Antibiotic, MIC, MIC unit, AST, pH, Temperature, Other information`. One Sample ID can appear in unlimited antibiotic rows.")
+            ast_csv=gr.File(label="Upload AST/MIC CSV or Excel",file_types=[".csv",".xlsx",".xls"],type="filepath")
             ast_csv_button=gr.Button("📥 Load Multiple-Sample CSV")
             ast_csv_message=gr.Markdown()
             ast_csv_button.click(load_ast_csv,ast_csv,[ast_table,ast_csv_message])
@@ -608,7 +612,7 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
 
             gr.Markdown("### 2️⃣ Multiple-sample upload")
             gr.Markdown("Upload a CSV containing **any number of samples**. Recommended columns: `Sample ID, Temperature, pH, Antibiotic, MIC, AST, Other information`.")
-            meta_csv=gr.File(label="Upload experimental metadata CSV",file_types=[".csv"],type="filepath")
+            meta_csv=gr.File(label="Upload experimental metadata CSV or Excel",file_types=[".csv",".xlsx",".xls"],type="filepath")
             meta_csv_button=gr.Button("📥 Load Multiple-Sample Metadata")
             meta_csv_message=gr.Markdown()
             meta_csv_button.click(load_metadata_csv,meta_csv,[meta,meta_csv_message])
