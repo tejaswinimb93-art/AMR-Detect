@@ -134,6 +134,43 @@ def analyse_zip(zip_file):
     finally: shutil.rmtree(folder,ignore_errors=True)
 
 
+def add_ast_result(data, sample_id, antibiotic, mic, unit, ast_result, notes):
+    columns=["Sample ID","AMR Finding","Antibiotic","MIC","AST","pH","Temperature","Comparison"]
+    try:
+        df=data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(columns=columns)
+        if df.empty: df=pd.DataFrame(columns=columns)
+        for col in columns:
+            if col not in df.columns: df[col]=""
+        if not str(sample_id).strip(): return df, "Please enter a Sample ID."
+        if not str(antibiotic).strip(): return df, "Please enter an antibiotic."
+        if not str(mic).strip(): return df, "Please enter the MIC value."
+        try:
+            float(mic)
+        except ValueError:
+            return df, "MIC must be a numeric value."
+        row={"Sample ID":str(sample_id).strip(),"AMR Finding":"","Antibiotic":str(antibiotic).strip(),"MIC":f"{str(mic).strip()} {unit}".strip(),"AST":str(ast_result).strip(),"pH":"","Temperature":"","Comparison":"","Notes":str(notes).strip()}
+        df=pd.concat([df,pd.DataFrame([row])],ignore_index=True)
+        return df[columns], f"Added AST/MIC result for {sample_id}."
+    except Exception as e:
+        return data, f"Could not add result: {e}"
+
+
+def load_ast_csv(csv_file):
+    columns=["Sample ID","AMR Finding","Antibiotic","MIC","AST","pH","Temperature","Comparison"]
+    if not csv_file:
+        return pd.DataFrame(columns=columns), "No CSV file selected."
+    try:
+        df=pd.read_csv(csv_file)
+        aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","antibiotic":"Antibiotic","MIC":"MIC","mic":"MIC","AST":"AST","ast":"AST","pH":"pH","ph":"pH","temperature":"Temperature","temp":"Temperature","AMR Finding":"AMR Finding","amr_finding":"AMR Finding"}
+        df=df.rename(columns={c:aliases.get(c,c) for c in df.columns})
+        for col in columns:
+            if col not in df.columns: df[col]=""
+        df=df[columns].copy()
+        return df, f"Loaded {len(df)} AST/MIC row(s) from CSV."
+    except Exception as e:
+        return pd.DataFrame(columns=columns), f"CSV could not be loaded: {e}"
+
+
 def compare_samples(data):
     if data is None: return pd.DataFrame(columns=COMPARISON_COLUMNS)
     try:
@@ -221,8 +258,26 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             bz=gr.File(label="Upload ZIP containing FASTA files",file_types=[".zip"],type="filepath"); bb=gr.Button("📊 Analyse All Samples",variant="primary")
             bt=gr.Dataframe(headers=["Sample ID","Detected organism","FASTA file","Sequence length","GC content","AMR status","AMRFinderPlus result","Interpretation"],interactive=False,wrap=True); bb.click(analyse_zip,bz,bt)
         with gr.Tab("🧪 AST + MIC"):
-            gr.Markdown("## AST + MIC\nEnter laboratory-generated phenotypic information. These values are not inferred from FASTA.")
-            ast=gr.Dataframe(headers=COMPARISON_COLUMNS,value=[["","","","","","","",""]],interactive=True,wrap=True)
+            gr.Markdown("## 🧪 Phenotypic AST & MIC Data\n\nEnter **laboratory-generated** susceptibility results. AMRIVA does not perform the wet-lab test or infer AST/MIC from a FASTA sequence.")
+            gr.Markdown("### Quick entry")
+            with gr.Row():
+                ast_sample=gr.Textbox(label="Sample ID",placeholder="e.g. AMR-001")
+                ast_antibiotic=gr.Textbox(label="Antibiotic",placeholder="e.g. Ciprofloxacin")
+                ast_mic=gr.Textbox(label="MIC value",placeholder="e.g. 0.5")
+                ast_unit=gr.Dropdown(["µg/mL","mg/L","other"],value="µg/mL",label="MIC unit")
+            with gr.Row():
+                ast_result=gr.Dropdown(["Susceptible","Intermediate","Resistant","Not provided"],value="Not provided",label="AST result")
+                ast_notes=gr.Textbox(label="Experimental notes",placeholder="Optional")
+            ast_add=gr.Button("＋ Add AST/MIC Result",variant="primary")
+            ast_message=gr.Markdown()
+            ast_table=gr.Dataframe(headers=COMPARISON_COLUMNS,value=[["","","","","","","",""]],interactive=True,wrap=True,label="AST/MIC results")
+            ast_add.click(add_ast_result,[ast_table,ast_sample,ast_antibiotic,ast_mic,ast_unit,ast_result,ast_notes],[ast_table,ast_message])
+            gr.Markdown("### 📄 Upload AST/MIC results from a spreadsheet")
+            gr.Markdown("Use CSV columns such as `Sample ID, Antibiotic, MIC, AST, pH, Temperature`. This avoids entering every laboratory result manually.")
+            ast_csv=gr.File(label="Upload AST/MIC CSV",file_types=[".csv"],type="filepath")
+            ast_csv_button=gr.Button("📥 Load CSV")
+            ast_csv_message=gr.Markdown()
+            ast_csv_button.click(load_ast_csv,ast_csv,[ast_table,ast_csv_message])
         with gr.Tab("🌡️ Experimental Metadata"):
             gr.Markdown("## Experimental Metadata\nAdd laboratory/research information such as pH and temperature. AMRIVA does not determine these values from FASTA.")
             meta=gr.Dataframe(headers=["Sample ID","Temperature","pH","Antibiotic","MIC","AST","Other information"],interactive=True,wrap=True)
