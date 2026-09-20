@@ -290,31 +290,159 @@ def load_metadata_csv(csv_file):
     except Exception as e:
         return pd.DataFrame(columns=columns), f"CSV could not be loaded: {e}"
 
-def compare_samples(data):
-    if data is None: return pd.DataFrame(columns=COMPARISON_COLUMNS)
-    try:
-        df=data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(data)
-        if df.empty: return pd.DataFrame(columns=COMPARISON_COLUMNS)
-        for col in COMPARISON_COLUMNS:
-            if col not in df.columns: df[col]=""
-        df=df[COMPARISON_COLUMNS].copy(); out=[]
-        for _,r in df.iterrows():
-            genomic=str(r["AMR Finding"]).lower().strip(); ast=str(r["AST"]).lower().strip()
-            if not genomic or not ast: c="Insufficient data"
-            elif ("resistance" in genomic or "resistant" in genomic or "detected" in genomic) and ast=="resistant": c="Concordant"
-            elif ("resistance" in genomic or "resistant" in genomic or "detected" in genomic) and ast=="susceptible": c="Discordant"
-            else: c="Requires interpretation"
-            out.append(c)
-        df["Comparison"]=out
-        return df
-    except Exception as e: return pd.DataFrame({"Error":[str(e)]})
+def analyse_single_with_state(fasta_file):
+    result = analyse_single(fasta_file)
+    # analyse_single returns summary + 14 fields. Keep a compact genomic record for comparison.
+    if not fasta_file or result[1] == "":
+        return (*result, pd.DataFrame(columns=["Sample ID","Detected organism","AMR status","AMRFinderPlus result"]))
+    genomic = pd.DataFrame([{
+        "Sample ID": result[1],
+        "Detected organism": result[2],
+        "AMR status": result[11],
+        "AMRFinderPlus result": result[12]
+    }])
+    return (*result, genomic)
 
+
+def analyse_zip_with_state(zip_file):
+    df = analyse_zip(zip_file)
+    return df, df.copy()
+
+
+def _normalise_columns(df, aliases):
+    if df is None:
+        return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    rename = {c: aliases.get(str(c).strip(), str(c).strip()) for c in df.columns}
+    return df.rename(columns=rename)
+
+
+def build_comparative_analysis(genomic_data, ast_data, metadata_data):
+    columns = ["Sample ID","Detected organism","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"]
+    empty = pd.DataFrame(columns=columns)
+    try:
+        g = _normalise_columns(genomic_data, {
+            "Sample ID":"Sample ID", "Detected organism":"Detected organism",
+            "AMR status":"AMR status", "AMRFinderPlus result":"AMRFinderPlus result",
+            "AMR Finding":"AMR Finding"
+        })
+        a = _normalise_columns(ast_data, {
+            "Sample ID":"Sample ID", "Antibiotic":"Antibiotic", "MIC":"MIC",
+            "MIC unit":"MIC unit", "AST":"AST", "AST result":"AST",
+            "Experimental notes":"Other information", "Other information":"Other information"
+        })
+        m = _normalise_columns(metadata_data, {
+            "Sample ID":"Sample ID", "Temperature":"Temperature", "Temperature (°C)":"Temperature",
+            "pH":"pH", "Antibiotic":"Antibiotic", "MIC":"MIC", "AST":"AST",
+            "Other information":"Other information", "Other Information":"Other information"
+        })
+
+        if a.empty and m.empty:
+            return empty, "Add AST/MIC or experimental metadata first."
+
+        # AST is the primary phenotypic table. If metadata has antibiotic-level rows,
+        # retain those values as additional information rather than duplicating blindly.
+        if a.empty:
+            base = m.copy()
+        else:
+            base = a.copy()
+
+        for c in ["Sample ID","Antibiotic","MIC","MIC unit","AST","Other information"]:
+            if c not in base.columns: base[c] = ""
+
+        # Add sample-level metadata by Sample ID. If metadata contains an antibiotic,
+        # prefer an exact Sample ID + Antibiotic match where available.
+        if not m.empty and "Sample ID" in m.columns:
+            for c in ["pH","Temperature"]:
+                if c not in m.columns: m[c] = ""
+            if "Antibiotic" in m.columns and "Antibiotic" in base.columns:
+                mm = m[["Sample ID","Antibiotic","pH","Temperature"]].copy()
+                mm["Sample ID"] = mm["Sample ID"].astype(str).str.strip()
+                mm["Antibiotic"] = mm["Antibiotic"].astype(str).str.strip()
+                base["Sample ID"] = base["Sample ID"].astype(str).str.strip()
+                base["Antibiotic"] = base["Antibiotic"].astype(str).str.strip()
+                exact = mm[mm["Antibiotic"].ne("")].drop_duplicates(["Sample ID","Antibiotic"])
+                base = base.merge(exact, on=["Sample ID","Antibiotic"], how="left")
+                # Also apply sample-level metadata rows whose Antibiotic is blank.
+                sample_meta = mm[mm["Antibiotic"].eq("")][["Sample ID","pH","Temperature"]].drop_duplicates("Sample ID")
+                if not sample_meta.empty:
+                    base = base.merge(sample_meta, on="Sample ID", how="left", suffixes=("","_sample"))
+                    base["pH"] = base["pH"].replace("", pd.NA).fillna(base["pH_sample"])
+                    base["Temperature"] = base["Temperature"].replace("", pd.NA).fillna(base["Temperature_sample"])
+                    base.drop(columns=["pH_sample","Temperature_sample"], inplace=True)
+            else:
+                mm = m[["Sample ID","pH","Temperature"]].copy().drop_duplicates("Sample ID")
+                base["Sample ID"] = base["Sample ID"].astype(str).str.strip()
+                mm["Sample ID"] = mm["Sample ID"].astype(str).str.strip()
+                base = base.merge(mm, on="Sample ID", how="left")
+
+        if "pH" not in base.columns: base["pH"] = ""
+        if "Temperature" not in base.columns: base["Temperature"] = ""
+
+        # Attach genomic findings by Sample ID.
+        if not g.empty and "Sample ID" in g.columns:
+            g["Sample ID"] = g["Sample ID"].astype(str).str.strip()
+            g["AMR Finding"] = g.get("AMR Finding", "")
+            if "AMR Finding" not in g.columns or g["AMR Finding"].astype(str).str.strip().eq("").all():
+                status = g.get("AMR status", "").astype(str)
+                result = g.get("AMRFinderPlus result", "").astype(str)
+                g["AMR Finding"] = result.where(~result.str.contains("No known AMR determinant detected", case=False, na=False), "No known AMR determinant detected")
+            keep = [c for c in ["Sample ID","Detected organism","AMR Finding"] if c in g.columns]
+            base = base.merge(g[keep].drop_duplicates("Sample ID"), on="Sample ID", how="left")
+        else:
+            base["Detected organism"] = ""
+            base["AMR Finding"] = ""
+
+        if "Detected organism" not in base.columns: base["Detected organism"] = ""
+        if "AMR Finding" not in base.columns: base["AMR Finding"] = ""
+        if "Other information" not in base.columns: base["Other information"] = ""
+        if "MIC unit" not in base.columns: base["MIC unit"] = ""
+
+        # Comparison is deliberately conservative: only classify when an AST result and
+        # a clearly relevant genomic finding are both present. Presence of any AMR gene
+        # is not automatically evidence of resistance to every antibiotic.
+        def classify(row):
+            finding = str(row.get("AMR Finding", "")).strip().lower()
+            ast = str(row.get("AST", "")).strip().lower()
+            antibiotic = str(row.get("Antibiotic", "")).strip()
+            if not ast or ast in {"not provided", "nan", "none"}: return "Insufficient data"
+            if not finding or finding in {"nan", "none", "no known amr determinant detected"}: return "Insufficient data"
+            # Do not claim concordance merely because a determinant exists.
+            if ast == "resistant": return "Requires interpretation"
+            if ast in {"susceptible", "intermediate"}: return "Requires interpretation"
+            return "Insufficient data"
+
+        base["Comparison"] = base.apply(classify, axis=1)
+        out = base[columns].fillna("")
+        return out, f"Built comparative analysis for {len(out)} antibiotic test row(s)."
+    except Exception as e:
+        return empty, f"Comparative analysis could not be built: {e}"
+
+
+def compare_samples(data):
+    # Kept for compatibility with older calls.
+    if data is None: return pd.DataFrame(columns=COMPARISON_COLUMNS)
+    df = data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(data)
+    for col in COMPARISON_COLUMNS:
+        if col not in df.columns: df[col] = ""
+    return df[COMPARISON_COLUMNS]
+
+
+def run_comparative(genomic_data, ast_data, metadata_data):
+    result, message = build_comparative_analysis(genomic_data, ast_data, metadata_data)
+    summary = comparison_summary(result)
+    return result, message, summary
 
 def comparison_summary(data):
-    df=compare_samples(data)
+    if data is None: return "### No comparison data entered."
+    df=data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(data)
     if df.empty: return "### No comparison data entered."
-    c=(df["Comparison"]=="Concordant").sum(); d=(df["Comparison"]=="Discordant").sum(); i=(df["Comparison"]=="Insufficient data").sum()
-    return f"### 📊 Summary\n\n**Samples entered:** {len(df)}\n\n🟢 Concordant: **{c}**  \n🟠 Discordant: **{d}**  \n⚪ Insufficient data: **{i}**\n\nComparison is based only on entered information and does not replace laboratory interpretation."
+    c=(df.get("Comparison",pd.Series(dtype=str)).astype(str)=="Concordant").sum()
+    d=(df.get("Comparison",pd.Series(dtype=str)).astype(str)=="Discordant").sum()
+    i=(df.get("Comparison",pd.Series(dtype=str)).astype(str)=="Insufficient data").sum()
+    r=(df.get("Comparison",pd.Series(dtype=str)).astype(str)=="Requires interpretation").sum()
+    return f"### 📊 Summary\n\n**Antibiotic test rows:** {len(df)}\n\n🟢 Concordant: **{c}**  \n🟠 Discordant: **{d}**  \n🟡 Requires interpretation: **{r}**  \n⚪ Insufficient data: **{i}**\n\nAMRIVA does not infer clinical susceptibility from a genomic determinant alone. Concordance/discordance requires appropriate organism-, drug- and standard-specific interpretation."
 
 
 def dashboard(data,sample_id):
@@ -359,6 +487,7 @@ LIMITS="""# ⚠️ Limitations & Disclaimer\n\nAMRIVA is a **research and educat
 CSS=""".gradio-container{max-width:1400px!important;margin:auto!important}#hero{padding:36px 30px;border-radius:24px;margin-bottom:22px;background:linear-gradient(135deg,#123c69,#0f766e);color:white}#hero h1{font-size:50px!important;margin-bottom:5px!important}#hero p{font-size:18px!important}"""
 
 with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
+    genomic_state = gr.State(pd.DataFrame(columns=["Sample ID","Detected organism","AMR status","AMRFinderPlus result"]))
     gr.HTML("<div id='hero'><h1>🧬 AMRIVA</h1><p>Antimicrobial Resistance Genomic Analysis Platform</p><p>Genomic screening • AST/MIC integration • Comparative analysis</p></div>")
     with gr.Tabs():
         with gr.Tab("🏠 Home"): gr.Markdown(HOME)
@@ -371,11 +500,11 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             with gr.Row(): sl=gr.Textbox(label="Sequence length"); sgc=gr.Textbox(label="GC content"); sst=gr.Textbox(label="AMR status")
             with gr.Row(): sa=gr.Textbox(label="A"); sg=gr.Textbox(label="G"); sc=gr.Textbox(label="C"); st=gr.Textbox(label="T"); sn=gr.Textbox(label="N")
             samr=gr.Textbox(label="AMRFinderPlus Result",lines=14); sint=gr.Textbox(label="Genomic Interpretation",lines=6); sh=gr.Textbox(label="FASTA Header",visible=False)
-            sb.click(analyse_single,sf,[ss,sid,sorg,sfn,sl,sa,sg,sc,st,sn,sgc,sst,samr,sint,sh])
+            sb.click(analyse_single_with_state,sf,[ss,sid,sorg,sfn,sl,sa,sg,sc,st,sn,sgc,sst,samr,sint,sh,genomic_state])
         with gr.Tab("📁 Multiple Samples"):
             gr.Markdown("## Batch Analysis\nUpload **one ZIP containing any number of FASTA files**. AMRIVA analyses every `.fa`, `.fasta` and `.fna` file automatically.")
             bz=gr.File(label="Upload ZIP containing FASTA files",file_types=[".zip"],type="filepath"); bb=gr.Button("📊 Analyse All Samples",variant="primary")
-            bt=gr.Dataframe(headers=["Sample ID","Detected organism","FASTA file","Sequence length","GC content","AMR status","AMRFinderPlus result","Interpretation"],interactive=False,wrap=True); bb.click(analyse_zip,bz,bt)
+            bt=gr.Dataframe(headers=["Sample ID","Detected organism","FASTA file","Sequence length","GC content","AMR status","AMRFinderPlus result","Interpretation"],interactive=False,wrap=True); bb.click(analyse_zip_with_state,bz,[bt,genomic_state])
         with gr.Tab("🧪 AST + MIC"):
             gr.Markdown("## 🧪 Phenotypic AST & MIC Data")
             gr.Markdown("Enter **laboratory-generated** susceptibility results. AMRIVA does not perform the wet-lab test or infer AST/MIC from a FASTA sequence.")
@@ -459,9 +588,16 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             meta_csv_message=gr.Markdown()
             meta_csv_button.click(load_metadata_csv,meta_csv,[meta,meta_csv_message])
         with gr.Tab("⭐ Comparative Analysis"):
-            gr.Markdown("## ⭐ Comparative Analysis\nCombine genomic findings, AST, MIC, pH and temperature to compare samples.")
-            ci=gr.Dataframe(headers=COMPARISON_COLUMNS,value=[["","","","","","","",""]],interactive=True,wrap=True); cb=gr.Button("⭐ Run Comparative Analysis",variant="primary"); co=gr.Dataframe(label="Comparative Results",interactive=False,wrap=True); cs=gr.Markdown()
-            cb.click(compare_samples,ci,co); cb.click(comparison_summary,ci,cs)
+            gr.Markdown("## ⭐ Comparative Analysis")
+            gr.Markdown("AMRIVA combines **genomic AMR screening + phenotypic AST/MIC + pH + temperature** using the common **Sample ID**. Add AST/MIC and metadata first, then run the comparison.")
+            gr.Markdown("### Data sources")
+            gr.Markdown("The genomic source comes from the FASTA/ZIP analysis in this browser session. AST/MIC and experimental metadata come from the tables in their respective tabs.")
+            cb=gr.Button("⭐ Build Comparative Analysis",variant="primary")
+            cmsg=gr.Markdown()
+            co=gr.Dataframe(headers=["Sample ID","Detected organism","AMR Finding","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"],interactive=False,wrap=True,label="Integrated Genotype–Phenotype Comparison")
+            cs=gr.Markdown()
+            cb.click(run_comparative,[genomic_state,ast_table,meta],[co,cmsg,cs])
+            gr.Markdown("**Comparison status is conservative:** a genomic determinant is not automatically treated as evidence of resistance to every antibiotic. Appropriate breakpoint and biological interpretation are required.")
         with gr.Tab("📋 Sample Dashboard"):
             gr.Markdown("## 📋 Integrated Sample Dashboard\nEnter a sample ID to view its combined information.")
             dd=gr.Dataframe(headers=COMPARISON_COLUMNS,interactive=True,wrap=True); ds=gr.Textbox(label="Sample ID"); db=gr.Button("📋 View Dashboard",variant="primary"); dout=gr.Markdown(); db.click(dashboard,[dd,ds],dout)
