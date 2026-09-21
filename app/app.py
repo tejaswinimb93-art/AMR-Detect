@@ -5,13 +5,14 @@ import gradio as gr
 APP_NAME = "AMRIVA"
 
 ORGANISM_MAP = {
-    "escherichia coli":"Escherichia", "e. coli":"Escherichia",
-    "klebsiella pneumoniae":"Klebsiella_pneumoniae",
-    "pseudomonas aeruginosa":"Pseudomonas_aeruginosa",
-    "acinetobacter baumannii":"Acinetobacter_baumannii",
-    "staphylococcus aureus":"Staphylococcus_aureus",
+    "escherichia coli":"Escherichia coli", "e. coli":"Escherichia coli", "escherichia_coli":"Escherichia coli", "ecoli":"Escherichia coli", "e_coli":"Escherichia coli",
+
+    "klebsiella pneumoniae":"Klebsiella pneumoniae", "klebsiella_pneumoniae":"Klebsiella pneumoniae", "klebsiella":"Klebsiella pneumoniae",
+    "pseudomonas aeruginosa":"Pseudomonas aeruginosa", "pseudomonas_aeruginosa":"Pseudomonas aeruginosa", "pseudomonas":"Pseudomonas aeruginosa",
+    "acinetobacter baumannii":"Acinetobacter baumannii", "acinetobacter_baumannii":"Acinetobacter baumannii",
+    "staphylococcus aureus":"Staphylococcus aureus", "staphylococcus_aureus":"Staphylococcus aureus",
     "staphylococcus epidermidis":"Staphylococcus_epidermidis",
-    "enterococcus faecalis":"Enterococcus_faecalis",
+    "enterococcus faecalis":"Enterococcus faecalis", "enterococcus_faecalis":"Enterococcus faecalis",
     "enterococcus faecium":"Enterococcus_faecium",
     "salmonella spp.":"Salmonella", "salmonella":"Salmonella",
     "haemophilus influenzae":"Haemophilus_influenzae",
@@ -40,9 +41,16 @@ def read_fasta(filepath):
 
 
 def detect_organism(header, filename):
-    text=f"{header} {filename}".lower()
+    """Resolve organism from explicit FASTA metadata/header or filename.
+
+    AMRFinderPlus is an AMR-determinant detector, not a species-identification
+    engine. Therefore this field is populated only from supplied FASTA metadata
+    (header/filename); it is never invented from the AMR gene result.
+    """
+    text=f"{header} {filename}".lower().replace("-", "_")
     for name in sorted(ORGANISM_MAP, key=len, reverse=True):
-        if name in text: return name.title(), ORGANISM_MAP[name]
+        if name in text:
+            return ORGANISM_MAP[name], ORGANISM_MAP[name]
     return "Identification not available from FASTA metadata", None
 
 
@@ -98,6 +106,8 @@ def _amrfinder_dataframe(sample_id, raw_result):
             "Gene symbol": "AMR Gene",
             "Element symbol": "AMR Gene",
             "Sequence name": "Protein / Function",
+            "Element name": "Protein / Function",
+            "HMM description": "Protein / Function",
             "HMM description": "Protein / Function",
             "Class": "Resistance Class",
             "% Identity to reference sequence": "Identity (%)",
@@ -118,7 +128,7 @@ def _amrfinder_dataframe(sample_id, raw_result):
         if "Protein / Function" not in df.columns:
             for c in df.columns:
                 lc = str(c).lower()
-                if "sequence name" in lc or "description" in lc:
+                if "element name" in lc or "sequence name" in lc or "description" in lc or "protein" in lc or "function" in lc:
                     df["Protein / Function"] = df[c]
                     break
         if "Resistance Class" not in df.columns and "Class" in df.columns:
@@ -176,8 +186,11 @@ def _amrfinder_determinants(parsed):
 
 
 def run_amrfinder(fasta_file, amrfinder_organism=None):
+    # AMRFinderPlus nucleotide mode is authoritative for the AMR result.
+    # Do not pass our metadata-derived organism string to -O because that
+    # option has its own controlled organism vocabulary and is not needed
+    # for ordinary nucleotide AMR screening.
     cmd=["amrfinder","-n",fasta_file]
-    if amrfinder_organism: cmd += ["-O",amrfinder_organism]
     try:
         r=subprocess.run(cmd,capture_output=True,text=True,timeout=300)
         if r.returncode != 0:
@@ -261,6 +274,15 @@ def analyse_zip(zip_file):
                 parsed=_amrfinder_dataframe(sid,result) if success else pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS)
                 if isinstance(parsed, pd.DataFrame) and not parsed.empty:
                     detail_frames.append(parsed)
+                else:
+                    detail_frames.append(pd.DataFrame([{
+                        "Sample ID": sid,
+                        "AMR Gene": "—",
+                        "Protein / Function": "—",
+                        "Resistance Class": "—",
+                        "Identity (%)": "—",
+                        "Coverage (%)": "—",
+                    }], columns=AMRFINDER_DISPLAY_COLUMNS))
                 status,interpretation=interpret_amr(success,result,parsed)
                 determinant_summary=_amrfinder_determinants(parsed) if not parsed.empty else ("No known AMR determinant detected." if success else result)
                 rows.append({"Sample ID":sid,"Detected organism":organism,"FASTA file":name,"Sequence length":stats["length"],"GC content":f'{stats["GC"]:.2f}%',"AMR status":status,"AMRFinderPlus result":determinant_summary,"Interpretation":interpretation})
@@ -821,17 +843,17 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             gr.Markdown("## Single-Sample Analysis\nUpload one FASTA sequence for genomic AMR screening.")
             sf=gr.File(label="Upload FASTA",file_types=[".fa",".fasta",".fna"],type="filepath")
             sb=gr.Button("🧬 Analyse Sample",variant="primary"); ss=gr.Textbox(label="Analysis summary")
-            with gr.Row(): sid=gr.Textbox(label="Sample ID"); sorg=gr.Textbox(label="Organism information")
+            with gr.Row(): sid=gr.Textbox(label="Sample ID"); sorg=gr.Textbox(label="Detected organism (from FASTA metadata)")
             sfn=gr.Textbox(label="FASTA file")
             with gr.Row(): sl=gr.Textbox(label="Sequence length"); sgc=gr.Textbox(label="GC content"); sst=gr.Textbox(label="AMR status")
             with gr.Row(): sa=gr.Textbox(label="A"); sg=gr.Textbox(label="G"); sc=gr.Textbox(label="C"); st=gr.Textbox(label="T"); sn=gr.Textbox(label="N")
-            samr=gr.Dataframe(headers=AMRFINDER_DISPLAY_COLUMNS,interactive=False,wrap=True,label="AMRFinderPlus Result — detailed table"); sint=gr.Textbox(label="Genomic Interpretation",lines=6); sh=gr.Textbox(label="FASTA Header",visible=False)
+            samr=gr.Dataframe(headers=AMRFINDER_DISPLAY_COLUMNS,interactive=False,wrap=True,label="AMRFinderPlus Result — detailed table (actual AMRFinderPlus output)"); sint=gr.Textbox(label="Genomic Interpretation",lines=6); sh=gr.Textbox(label="FASTA Header",visible=False)
             sb.click(analyse_single_with_state,sf,[ss,sid,sorg,sfn,sl,sa,sg,sc,st,sn,sgc,sst,samr,sint,sh,genomic_state])
         with gr.Tab("📁 Multiple Samples"):
             gr.Markdown("## Batch Analysis\nUpload **one ZIP containing any number of FASTA files**. AMRIVA analyses every `.fa`, `.fasta` and `.fna` file automatically.")
             bz=gr.File(label="Upload ZIP containing FASTA files",file_types=[".zip"],type="filepath"); bb=gr.Button("📊 Analyse All Samples",variant="primary")
             bt=gr.Dataframe(headers=["Sample ID","Detected organism","FASTA file","Sequence length","GC content","AMR status","AMRFinderPlus result","Interpretation"],interactive=False,wrap=True, label="Batch genomic summary")
-            bdetail=gr.Dataframe(headers=AMRFINDER_DISPLAY_COLUMNS,interactive=False,wrap=True,label="AMRFinderPlus Result — detailed table (separate from AMR status)")
+            bdetail=gr.Dataframe(headers=AMRFINDER_DISPLAY_COLUMNS,interactive=False,wrap=True,label="AMRFinderPlus Result — detailed table (actual AMRFinderPlus output, separate from AMR status)")
             bb.click(analyse_zip_with_state,bz,[bt,genomic_state,bdetail])
         with gr.Tab("🧪 AST + MIC"):
             gr.Markdown("## 🧪 Phenotypic AST & MIC Data")
