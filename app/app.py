@@ -5,25 +5,26 @@ import gradio as gr
 APP_NAME = "AMRIVA"
 
 ORGANISM_MAP = {
-    "escherichia coli":"Escherichia coli", "e. coli":"Escherichia coli", "escherichia_coli":"Escherichia coli", "ecoli":"Escherichia coli", "e_coli":"Escherichia coli",
-
-    "klebsiella pneumoniae":"Klebsiella pneumoniae", "klebsiella_pneumoniae":"Klebsiella pneumoniae", "klebsiella":"Klebsiella pneumoniae",
-    "pseudomonas aeruginosa":"Pseudomonas aeruginosa", "pseudomonas_aeruginosa":"Pseudomonas aeruginosa", "pseudomonas":"Pseudomonas aeruginosa",
-    "acinetobacter baumannii":"Acinetobacter baumannii", "acinetobacter_baumannii":"Acinetobacter baumannii",
-    "staphylococcus aureus":"Staphylococcus aureus", "staphylococcus_aureus":"Staphylococcus aureus",
-    "staphylococcus epidermidis":"Staphylococcus_epidermidis",
-    "enterococcus faecalis":"Enterococcus faecalis", "enterococcus_faecalis":"Enterococcus faecalis",
-    "enterococcus faecium":"Enterococcus_faecium",
-    "salmonella spp.":"Salmonella", "salmonella":"Salmonella",
-    "haemophilus influenzae":"Haemophilus_influenzae",
-    "neisseria gonorrhoeae":"Neisseria_gonorrhoeae",
-    "streptococcus agalactiae":"Streptococcus_agalactiae",
-    "streptococcus pneumoniae":"Streptococcus_pneumoniae",
-    "streptococcus pyogenes":"Streptococcus_pyogenes",
-    "campylobacter":"Campylobacter", "serratia marcescens":"Serratia_marcescens",
-    "vibrio cholerae":"Vibrio_cholerae", "vibrio parahaemolyticus":"Vibrio_parahaemolyticus",
-    "vibrio vulnificus":"Vibrio_vulnificus"
+    "escherichia coli": "Escherichia coli", "escherichia_coli": "Escherichia coli", "e. coli": "Escherichia coli", "ecoli": "Escherichia coli", "e_coli": "Escherichia coli",
+    "klebsiella pneumoniae": "Klebsiella pneumoniae", "klebsiella_pneumoniae": "Klebsiella pneumoniae", "klebsiella": "Klebsiella pneumoniae",
+    "pseudomonas aeruginosa": "Pseudomonas aeruginosa", "pseudomonas_aeruginosa": "Pseudomonas aeruginosa", "pseudomonas": "Pseudomonas aeruginosa",
+    "acinetobacter baumannii": "Acinetobacter baumannii", "acinetobacter_baumannii": "Acinetobacter baumannii",
+    "staphylococcus aureus": "Staphylococcus aureus", "staphylococcus_aureus": "Staphylococcus aureus",
+    "staphylococcus epidermidis": "Staphylococcus epidermidis", "staphylococcus_epidermidis": "Staphylococcus epidermidis",
+    "enterococcus faecalis": "Enterococcus faecalis", "enterococcus_faecalis": "Enterococcus faecalis",
+    "enterococcus faecium": "Enterococcus faecium", "enterococcus_faecium": "Enterococcus faecium",
+    "salmonella spp.": "Salmonella", "salmonella": "Salmonella",
+    "haemophilus influenzae": "Haemophilus influenzae", "haemophilus_influenzae": "Haemophilus influenzae",
+    "neisseria gonorrhoeae": "Neisseria gonorrhoeae", "neisseria_gonorrhoeae": "Neisseria gonorrhoeae",
+    "streptococcus agalactiae": "Streptococcus agalactiae", "streptococcus_agalactiae": "Streptococcus agalactiae",
+    "streptococcus pneumoniae": "Streptococcus pneumoniae", "streptococcus_pneumoniae": "Streptococcus pneumoniae",
+    "streptococcus pyogenes": "Streptococcus pyogenes", "streptococcus_pyogenes": "Streptococcus pyogenes",
+    "campylobacter": "Campylobacter", "serratia marcescens": "Serratia marcescens", "serratia_marcescens": "Serratia marcescens",
+    "vibrio cholerae": "Vibrio cholerae", "vibrio_cholerae": "Vibrio cholerae",
+    "vibrio parahaemolyticus": "Vibrio parahaemolyticus", "vibrio_parahaemolyticus": "Vibrio parahaemolyticus",
+    "vibrio vulnificus": "Vibrio vulnificus", "vibrio_vulnificus": "Vibrio vulnificus"
 }
+
 
 COMPARISON_COLUMNS = ["Sample ID","Detected organism","AMR Finding","AMRFinderPlus result","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"]
 
@@ -41,17 +42,18 @@ def read_fasta(filepath):
 
 
 def detect_organism(header, filename):
-    """Resolve organism from explicit FASTA metadata/header or filename.
+    """Resolve organism only from FASTA metadata/header or filename.
 
-    AMRFinderPlus is an AMR-determinant detector, not a species-identification
-    engine. Therefore this field is populated only from supplied FASTA metadata
-    (header/filename); it is never invented from the AMR gene result.
+    AMRFinderPlus detects AMR determinants; it is not being used here as a
+    species-identification engine. If the supplied FASTA does not contain
+    recognizable organism metadata, the UI still shows an explicit value
+    instead of an empty cell.
     """
     text=f"{header} {filename}".lower().replace("-", "_")
     for name in sorted(ORGANISM_MAP, key=len, reverse=True):
         if name in text:
             return ORGANISM_MAP[name], ORGANISM_MAP[name]
-    return "Identification not available from FASTA metadata", None
+    return "Organism not provided in FASTA metadata", None
 
 
 def calculate_statistics(sequence):
@@ -66,130 +68,100 @@ AMRFINDER_DISPLAY_COLUMNS = [
     "Identity (%)", "Coverage (%)"
 ]
 
+def _clean_amrfinder_value(value):
+    value=str(value).strip()
+    return "—" if value in {"", "nan", "None", "NA", "N/A"} else value
 
 def _amrfinder_dataframe(sample_id, raw_result):
-    """Convert AMRFinderPlus TSV output into the compact AMRIVA table.
-
-    AMRIVA keeps the detailed AMRFinderPlus evidence separate from the batch
-    summary. When AMRFinderPlus reports no hit, a visible placeholder row is
-    returned instead of leaving the table completely blank.
-    """
-    sid = str(sample_id or "").strip()
-    text = str(raw_result or "").strip()
-    empty_cols = AMRFINDER_DISPLAY_COLUMNS
-
-    def no_hit():
-        return pd.DataFrame([{
-            "Sample ID": sid,
-            "AMR Gene": "—",
-            "Protein / Function": "—",
-            "Resistance Class": "—",
-            "Identity (%)": "—",
-            "Coverage (%)": "—",
-        }], columns=empty_cols)
-
-    if not text:
-        return no_hit()
-    if text.startswith("No known AMR determinant detected"):
-        return no_hit()
+    """Parse current and older AMRFinderPlus TSV formats into AMRIVA's six-column table."""
+    sid=str(sample_id or "").strip()
+    text=str(raw_result or "").strip()
+    no_hit_row={
+        "Sample ID":sid, "AMR Gene":"—", "Protein / Function":"—",
+        "Resistance Class":"—", "Identity (%)":"—", "Coverage (%)":"—"
+    }
+    empty=pd.DataFrame([no_hit_row], columns=AMRFINDER_DISPLAY_COLUMNS)
+    if not text or text.startswith("No known AMR determinant detected"):
+        return empty
     if text.startswith("AMRFinderPlus analysis failed") or text.startswith("AMRFinderPlus was not found"):
-        return no_hit()
+        return empty
 
+    from io import StringIO
     try:
-        from io import StringIO
-        df = pd.read_csv(StringIO(text), sep="\t", dtype=str, keep_default_na=False)
+        df=pd.read_csv(StringIO(text), sep="\t", dtype=str, keep_default_na=False)
         if df.empty:
-            return no_hit()
+            return empty
 
-        # AMRFinderPlus standard TSV names.
-        aliases = {
-            "Gene symbol": "AMR Gene",
-            "Element symbol": "AMR Gene",
-            "Sequence name": "Protein / Function",
-            "Element name": "Protein / Function",
-            "HMM description": "Protein / Function",
-            "HMM description": "Protein / Function",
-            "Class": "Resistance Class",
-            "% Identity to reference sequence": "Identity (%)",
-            "% Coverage of reference sequence": "Coverage (%)",
-            "% Identity": "Identity (%)",
-            "% Coverage": "Coverage (%)",
-        }
-        df = df.rename(columns={str(c).strip(): aliases.get(str(c).strip(), str(c).strip()) for c in df.columns})
-
-        # If AMRFinderPlus has a different version's naming, use sensible
-        # fallbacks rather than dropping the valid hit.
-        if "AMR Gene" not in df.columns:
+        # AMRFinderPlus changed output field names in v4.0. The aliases below
+        # cover both the current names and older reports.
+        def find_col(candidates):
+            normalized={str(c).strip().lower(): c for c in df.columns}
+            for candidate in candidates:
+                if candidate.lower() in normalized:
+                    return normalized[candidate.lower()]
             for c in df.columns:
-                lc = str(c).lower()
-                if "gene" in lc and "symbol" in lc:
-                    df["AMR Gene"] = df[c]
-                    break
-        if "Protein / Function" not in df.columns:
-            for c in df.columns:
-                lc = str(c).lower()
-                if "element name" in lc or "sequence name" in lc or "description" in lc or "protein" in lc or "function" in lc:
-                    df["Protein / Function"] = df[c]
-                    break
-        if "Resistance Class" not in df.columns and "Class" in df.columns:
-            df["Resistance Class"] = df["Class"]
+                lc=str(c).strip().lower()
+                if any(candidate.lower() in lc for candidate in candidates):
+                    return c
+            return None
 
-        for c in empty_cols:
-            if c not in df.columns:
-                df[c] = ""
+        gene_col=find_col(["Element symbol", "Gene symbol", "gene_symbol", "AMR Gene"])
+        protein_col=find_col(["Element name", "Sequence name", "Protein name", "HMM description", "Name of closest sequence", "Protein / Function"])
+        class_col=find_col(["Class", "Resistance Class", "class"])
+        identity_col=find_col(["% Identity to reference sequence", "% Identity to reference protein", "% Identity", "Identity (%)", "pct_ref_identity"])
+        coverage_col=find_col(["% Coverage of reference sequence", "% Coverage of reference protein", "% Coverage", "Coverage (%)", "reference_sequence_coverage"])
 
-        out = df[empty_cols].copy()
-        out.insert(0, "Sample ID", sid) if "Sample ID" not in out.columns else None
-        # Replace genuinely empty cells with an em dash for readable results.
-        for c in empty_cols[1:]:
-            out[c] = out[c].astype(str).replace({"": "—", "nan": "—", "None": "—"})
-        return out[empty_cols]
+        out=pd.DataFrame({
+            "Sample ID":[sid]*len(df),
+            "AMR Gene":df[gene_col].map(_clean_amrfinder_value) if gene_col else ["—"]*len(df),
+            "Protein / Function":df[protein_col].map(_clean_amrfinder_value) if protein_col else ["—"]*len(df),
+            "Resistance Class":df[class_col].map(_clean_amrfinder_value) if class_col else ["—"]*len(df),
+            "Identity (%)":df[identity_col].map(_clean_amrfinder_value) if identity_col else ["—"]*len(df),
+            "Coverage (%)":df[coverage_col].map(_clean_amrfinder_value) if coverage_col else ["—"]*len(df),
+        })
 
+        # Ignore non-hit/diagnostic lines if a future AMRFinderPlus version emits them.
+        if "AMR Gene" in out.columns:
+            out=out[out["AMR Gene"].astype(str).str.strip().ne("—")].reset_index(drop=True)
+        return out[AMRFINDER_DISPLAY_COLUMNS] if not out.empty else empty
     except Exception:
-        # Headerless fallback for older/variant AMRFinderPlus output.
+        # Fallback for standard positional AMRFinderPlus TSVs. Current format:
+        # element symbol=5, element name=6, class=10, coverage=15, identity=16.
         try:
-            from io import StringIO
-            raw = pd.read_csv(StringIO(text), sep="\t", header=None, dtype=str, keep_default_na=False)
-            if raw.empty:
-                return no_hit()
-            # Standard AMRFinderPlus positional layout has Gene symbol around
-            # column 5 and Sequence name around column 6. Locate Class and
-            # identity/coverage by their standard positions when available.
-            def val(i):
-                return raw.iloc[:, i].astype(str) if i < raw.shape[1] else pd.Series(["—"] * len(raw))
-            out = pd.DataFrame({
-                "Sample ID": [sid] * len(raw),
-                "AMR Gene": val(5),
-                "Protein / Function": val(6),
-                "Resistance Class": val(10),
-                "Identity (%)": val(16),
-                "Coverage (%)": val(15),
+            raw=pd.read_csv(StringIO(text), sep="\t", header=None, dtype=str, keep_default_na=False)
+            if raw.empty or raw.shape[1] < 7:
+                return empty
+            def col(i, default="—"):
+                return raw.iloc[:, i].map(_clean_amrfinder_value) if i < raw.shape[1] else pd.Series([default]*len(raw))
+            out=pd.DataFrame({
+                "Sample ID":[sid]*len(raw),
+                "AMR Gene":col(5), "Protein / Function":col(6),
+                "Resistance Class":col(10), "Identity (%)":col(16), "Coverage (%)":col(15)
             })
-            for c in empty_cols[1:]:
-                out[c] = out[c].replace({"": "—", "nan": "—", "None": "—"})
-            return out[empty_cols]
+            out=out[out["AMR Gene"].ne("—")].reset_index(drop=True)
+            return out[AMRFINDER_DISPLAY_COLUMNS] if not out.empty else empty
         except Exception:
-            return no_hit()
+            return empty
+
+def _amrfinder_has_hits(parsed):
+    if not isinstance(parsed, pd.DataFrame) or parsed.empty or "AMR Gene" not in parsed.columns:
+        return False
+    return parsed["AMR Gene"].astype(str).str.strip().ne("—").any()
 
 def _amrfinder_determinants(parsed):
-    """Return a concise determinant summary for the AMR status column."""
-    if parsed is None or parsed.empty:
+    if not _amrfinder_has_hits(parsed):
         return ""
     vals=[]
-    for _, row in parsed.iterrows():
-        gene=str(row.get("AMR Gene", row.get("Gene symbol", ""))).strip()
-        seq=str(row.get("Sequence name", "")).strip()
-        value=gene or seq
-        if value and value not in vals:
+    for value in parsed["AMR Gene"].astype(str):
+        value=value.strip()
+        if value and value != "—" and value not in vals:
             vals.append(value)
     return ", ".join(vals)
 
-
 def run_amrfinder(fasta_file, amrfinder_organism=None):
-    # AMRFinderPlus nucleotide mode is authoritative for the AMR result.
-    # Do not pass our metadata-derived organism string to -O because that
-    # option has its own controlled organism vocabulary and is not needed
-    # for ordinary nucleotide AMR screening.
+    # Do not force -O from filename metadata. In AMRFinderPlus, -O selects a
+    # taxonomy group for mutation screening and changes reporting behaviour;
+    # ordinary nucleotide AMR-gene screening does not require it.
     cmd=["amrfinder","-n",fasta_file]
     try:
         r=subprocess.run(cmd,capture_output=True,text=True,timeout=300)
@@ -200,34 +172,31 @@ def run_amrfinder(fasta_file, amrfinder_organism=None):
     except FileNotFoundError: return False,"AMRFinderPlus was not found on the server."
     except Exception as e: return False,f"AMRFinderPlus analysis failed: {e}"
 
-
 def interpret_amr(success, result, parsed=None):
     if not success:
         return "AMR analysis could not be completed", "AMRFinderPlus did not complete successfully. Susceptibility cannot be inferred from this genomic analysis. Validated phenotypic AST is required for confirmation."
-    if parsed is None:
-        parsed = pd.DataFrame()
-    determinants = _amrfinder_determinants(parsed)
-    if parsed.empty:
+    if not _amrfinder_has_hits(parsed):
         return "No known AMR determinant detected", "AMRFinderPlus did not report a known AMR determinant in this sequence. This does not prove susceptibility. Phenotypic AST is required for confirmation."
+    determinants=_amrfinder_determinants(parsed)
     return f"AMR determinant(s) detected: {determinants}", "AMRFinderPlus detected the determinant(s) listed in the result table. These genomic findings may be associated with antimicrobial resistance; they do not by themselves establish phenotypic resistance. Phenotypic AST remains important for confirmation."
 
 
 def analyse_single(fasta_file):
     empty=("",)*14
-    if not fasta_file: return ("Please upload a FASTA file.",)+empty
+    if not fasta_file: return ("Please upload a FASTA file.",)+empty+(pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS),)
     try:
         header,seq=read_fasta(fasta_file)
         if not seq: raise ValueError("The FASTA file does not contain a nucleotide sequence.")
         filename=os.path.basename(fasta_file)
         organism,org=detect_organism(header,filename)
         stats=calculate_statistics(seq)
-        success,result=run_amrfinder(fasta_file,org)
         sample_id=header.split()[0] if header else os.path.splitext(filename)[0]
-        parsed=_amrfinder_dataframe(sample_id,result) if success else pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS)
+        success,result=run_amrfinder(fasta_file,org)
+        parsed=_amrfinder_dataframe(sample_id,result) if success else pd.DataFrame([{
+            "Sample ID":sample_id,"AMR Gene":"—","Protein / Function":"—","Resistance Class":"—","Identity (%)":"—","Coverage (%)":"—"
+        }],columns=AMRFINDER_DISPLAY_COLUMNS)
         status,interpretation=interpret_amr(success,result,parsed)
-        # The result field is now a concise determinant summary; the complete
-        # AMRFinderPlus output is shown separately as a dataframe in the UI.
-        result_summary = _amrfinder_determinants(parsed) if not parsed.empty else ("No known AMR determinant detected." if success else result)
+        result_summary=_amrfinder_determinants(parsed) if _amrfinder_has_hits(parsed) else ("No known AMR determinant detected." if success else result)
         return ("Sample analysed successfully.",sample_id,organism,filename,str(stats["length"]),str(stats["A"]),str(stats["G"]),str(stats["C"]),str(stats["T"]),str(stats["N"]),f'{stats["GC"]:.2f}%',status,result_summary,interpretation,header,parsed)
     except Exception as e:
         return (f"Analysis error: {e}",)+empty[:10]+("Analysis failed","","")+empty[-1:]+(pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS),)
@@ -271,20 +240,12 @@ def analyse_zip(zip_file):
                 if not seq:
                     rows.append({"Sample ID":sid,"Detected organism":"Unknown","FASTA file":name,"Sequence length":"0","GC content":"N/A","AMR status":"Invalid FASTA","AMRFinderPlus result":"No nucleotide sequence found.","Interpretation":"Analysis could not be performed."}); continue
                 organism,org=detect_organism(header,name); stats=calculate_statistics(seq); success,result=run_amrfinder(path,org)
-                parsed=_amrfinder_dataframe(sid,result) if success else pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS)
-                if isinstance(parsed, pd.DataFrame) and not parsed.empty:
-                    detail_frames.append(parsed)
-                else:
-                    detail_frames.append(pd.DataFrame([{
-                        "Sample ID": sid,
-                        "AMR Gene": "—",
-                        "Protein / Function": "—",
-                        "Resistance Class": "—",
-                        "Identity (%)": "—",
-                        "Coverage (%)": "—",
-                    }], columns=AMRFINDER_DISPLAY_COLUMNS))
+                parsed=_amrfinder_dataframe(sid,result) if success else pd.DataFrame([{
+                    "Sample ID":sid,"AMR Gene":"—","Protein / Function":"—","Resistance Class":"—","Identity (%)":"—","Coverage (%)":"—"
+                }],columns=AMRFINDER_DISPLAY_COLUMNS)
+                detail_frames.append(parsed)
                 status,interpretation=interpret_amr(success,result,parsed)
-                determinant_summary=_amrfinder_determinants(parsed) if not parsed.empty else ("No known AMR determinant detected." if success else result)
+                determinant_summary=_amrfinder_determinants(parsed) if _amrfinder_has_hits(parsed) else ("No known AMR determinant detected." if success else result)
                 rows.append({"Sample ID":sid,"Detected organism":organism,"FASTA file":name,"Sequence length":stats["length"],"GC content":f'{stats["GC"]:.2f}%',"AMR status":status,"AMRFinderPlus result":determinant_summary,"Interpretation":interpretation})
             except Exception as e:
                 rows.append({"Sample ID":f"AMR-BATCH-{i:03d}","Detected organism":"Unknown","FASTA file":name,"Sequence length":"Error","GC content":"Error","AMR status":"Analysis failed","AMRFinderPlus result":str(e),"Interpretation":"Analysis could not be completed."})
@@ -504,42 +465,6 @@ def merge_ast_sources(file_df, paste_df):
     return pd.concat(frames,ignore_index=True).fillna("")
 
 
-def add_metadata(data, sample_id, temperature, ph, antibiotic, mic, ast, other):
-    columns=["Sample ID","Temperature","pH","Antibiotic","MIC","AST","Other information"]
-    try:
-        df=data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(columns=columns)
-        if df.empty: df=pd.DataFrame(columns=columns)
-        for col in columns:
-            if col not in df.columns: df[col]=""
-        sample_id=str(sample_id).strip()
-        if not sample_id:
-            return df[columns], "Please enter a Sample ID."
-        if str(temperature).strip():
-            try: float(temperature)
-            except ValueError: return df[columns], "Temperature must be numeric."
-        if str(ph).strip():
-            try: float(ph)
-            except ValueError: return df[columns], "pH must be numeric."
-        row={"Sample ID":sample_id,"Temperature":str(temperature).strip(),"pH":str(ph).strip(),"Antibiotic":str(antibiotic).strip(),"MIC":str(mic).strip(),"AST":str(ast).strip(),"Other information":str(other).strip()}
-        df=pd.concat([df,pd.DataFrame([row])],ignore_index=True)
-        return df[columns], f"Added experimental metadata for {sample_id}."
-    except Exception as e:
-        return data, f"Could not add metadata: {e}"
-
-
-def load_metadata_csv(csv_file):
-    columns=["Sample ID","Temperature","pH","Antibiotic","MIC","AST","Other information"]
-    if not csv_file:
-        return pd.DataFrame(columns=columns), "No CSV file selected."
-    try:
-        df=pd.read_csv(csv_file)
-        aliases={"sample_id":"Sample ID","Sample_ID":"Sample ID","sample":"Sample ID","temperature":"Temperature","temp":"Temperature","Temperature (C)":"Temperature","pH":"pH","ph":"pH","antibiotic":"Antibiotic","MIC":"MIC","mic":"MIC","MIC unit":"MIC unit","mic_unit":"MIC unit","Unit":"MIC unit","unit":"MIC unit","AST":"AST","ast":"AST","notes":"Other information","Other Information":"Other information"}
-        df=df.rename(columns={c:aliases.get(c,c) for c in df.columns})
-        for col in columns:
-            if col not in df.columns: df[col]=""
-        return df[columns].copy(), f"Loaded {len(df)} metadata row(s) from CSV."
-    except Exception as e:
-        return pd.DataFrame(columns=columns), f"CSV could not be loaded: {e}"
 
 def analyse_single_with_state(fasta_file):
     result = analyse_single(fasta_file)
@@ -578,194 +503,67 @@ def _normalise_columns(df, aliases):
     return df.rename(columns=rename)
 
 
-def build_comparative_analysis(genomic_data, ast_data, metadata_data):
-    columns = ["Sample ID","Detected organism","AMR Finding","AMRFinderPlus result","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"]
-    empty = pd.DataFrame(columns=columns)
+def build_comparative_analysis(genomic_data, ast_data, metadata_data=None):
+    columns=["Sample ID","Detected organism","AMR Finding","AMRFinderPlus result","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"]
+    empty=pd.DataFrame(columns=columns)
     try:
-        g = _normalise_columns(genomic_data, {
-            "Sample ID":"Sample ID", "Detected organism":"Detected organism",
-            "AMR status":"AMR status", "AMRFinderPlus result":"AMRFinderPlus result",
-            "AMR Finding":"AMR Finding"
-        })
-        a = _normalise_columns(ast_data, {
-            "Sample ID":"Sample ID", "Antibiotic":"Antibiotic", "MIC":"MIC",
-            "MIC unit":"MIC unit", "AST":"AST", "AST result":"AST",
-            "Experimental notes":"Other information", "Other information":"Other information"
-        })
-        m = _normalise_columns(metadata_data, {
-            "Sample ID":"Sample ID", "Temperature":"Temperature", "Temperature (°C)":"Temperature",
-            "pH":"pH", "Antibiotic":"Antibiotic", "MIC":"MIC", "AST":"AST",
-            "Other information":"Other information", "Other Information":"Other information"
-        })
-
-        if a.empty and m.empty:
-            return empty, "Add AST/MIC or experimental metadata first."
-
-        # AST is the primary phenotypic table. If metadata has antibiotic-level rows,
-        # retain those values as additional information rather than duplicating blindly.
+        g=_normalise_columns(genomic_data,{"Sample ID":"Sample ID","Detected organism":"Detected organism","AMR status":"AMR status","AMRFinderPlus result":"AMRFinderPlus result","AMR Finding":"AMR Finding"})
+        a=_normalise_columns(ast_data,{"Sample ID":"Sample ID","Antibiotic":"Antibiotic","MIC":"MIC","MIC unit":"MIC unit","AST":"AST","AST result":"AST","pH":"pH","Temperature":"Temperature","Other information":"Other information"})
         if a.empty:
-            base = m.copy()
-        else:
-            base = a.copy()
+            return empty,"Add AST/MIC data first."
+        for c in ["Sample ID","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information"]:
+            if c not in a.columns: a[c]=""
+        base=a.copy()
+        base["Sample ID"]=base["Sample ID"].astype(str).str.strip()
 
-        for c in ["Sample ID","Antibiotic","MIC","MIC unit","AST","Other information"]:
-            if c not in base.columns: base[c] = ""
-
-        # Add sample-level metadata by Sample ID. Metadata can be sample-level
-        # (blank antibiotic) or antibiotic-specific. Blank values in the AST table
-        # are filled from metadata without creating duplicate pH/temperature columns.
-        if not m.empty and "Sample ID" in m.columns:
-            for c in ["pH", "Temperature"]:
-                if c not in m.columns: m[c] = ""
-            base["Sample ID"] = base["Sample ID"].astype(str).str.strip()
-            m["Sample ID"] = m["Sample ID"].astype(str).str.strip()
-
-            if "Antibiotic" in m.columns and "Antibiotic" in base.columns:
-                m["Antibiotic"] = m["Antibiotic"].astype(str).str.strip()
-                base["Antibiotic"] = base["Antibiotic"].astype(str).str.strip()
-
-                exact = m[m["Antibiotic"].ne("")][["Sample ID","Antibiotic","pH","Temperature"]].copy()
-                exact = exact.drop_duplicates(["Sample ID","Antibiotic"], keep="last")
-                exact = exact.rename(columns={"pH":"pH_meta_exact","Temperature":"Temperature_meta_exact"})
-                base = base.merge(exact, on=["Sample ID","Antibiotic"], how="left")
-
-                sample_meta = m[m["Antibiotic"].eq("")][["Sample ID","pH","Temperature"]].copy()
-                sample_meta = sample_meta.drop_duplicates("Sample ID", keep="last")
-                sample_meta = sample_meta.rename(columns={"pH":"pH_meta_sample","Temperature":"Temperature_meta_sample"})
-                if not sample_meta.empty:
-                    base = base.merge(sample_meta, on="Sample ID", how="left")
-
-                for target, candidates in {
-                    "pH":["pH_meta_exact","pH_meta_sample"],
-                    "Temperature":["Temperature_meta_exact","Temperature_meta_sample"]
-                }.items():
-                    if target not in base.columns: base[target] = ""
-                    base[target] = base[target].replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
-                    for candidate in candidates:
-                        if candidate in base.columns:
-                            base[target] = base[target].fillna(base[candidate])
-                    base[target] = base[target].fillna("")
-
-                drop_cols=[c for c in ["pH_meta_exact","Temperature_meta_exact","pH_meta_sample","Temperature_meta_sample"] if c in base.columns]
-                if drop_cols: base.drop(columns=drop_cols, inplace=True)
-            else:
-                mm=m[["Sample ID","pH","Temperature"]].drop_duplicates("Sample ID", keep="last").rename(columns={"pH":"pH_meta","Temperature":"Temperature_meta"})
-                base=base.merge(mm,on="Sample ID",how="left")
-                for target,meta_col in [("pH","pH_meta"),("Temperature","Temperature_meta")]:
-                    if target not in base.columns: base[target]=""
-                    if meta_col in base.columns:
-                        base[target]=base[target].replace({"":pd.NA}).fillna(base[meta_col]).fillna("")
-                        base.drop(columns=[meta_col],inplace=True)
-
-        if "pH" not in base.columns: base["pH"] = ""
-        if "Temperature" not in base.columns: base["Temperature"] = ""
-
-        # Attach genomic findings by Sample ID.
         if not g.empty and "Sample ID" in g.columns:
-            g["Sample ID"] = g["Sample ID"].astype(str).str.strip()
-            g["AMR Finding"] = g.get("AMR Finding", "")
-            g["AMRFinderPlus result"] = g.get("AMRFinderPlus result", "")
-            if g["AMR Finding"].astype(str).str.strip().eq("").all():
-                status = g.get("AMR status", "").astype(str)
-                result = g.get("AMRFinderPlus result", "").astype(str)
-                g["AMR Finding"] = result.where(~result.str.contains("No known AMR determinant detected", case=False, na=False), "No known AMR determinant detected")
-            keep = [c for c in ["Sample ID","Detected organism","AMR Finding","AMRFinderPlus result"] if c in g.columns]
+            g["Sample ID"]=g["Sample ID"].astype(str).str.strip()
+            if "AMR Finding" not in g.columns: g["AMR Finding"]=""
+            if "AMRFinderPlus result" not in g.columns: g["AMRFinderPlus result"]=""
+            if "Detected organism" not in g.columns: g["Detected organism"]=""
+            # For batch data, AMRFinderPlus result is the concise determinant list.
+            g["AMR Finding"]=g["AMR Finding"].replace({"":pd.NA,"nan":pd.NA,"None":pd.NA}).fillna(g["AMRFinderPlus result"]).fillna("")
+            keep=["Sample ID","Detected organism","AMR Finding","AMRFinderPlus result"]
+            # Replace any stale/manual genomic columns in the AST table with the
+            # authoritative genomic state for the same Sample ID.
             for old_col in ["Detected organism","AMR Finding","AMRFinderPlus result"]:
                 if old_col in base.columns:
                     base.drop(columns=[old_col], inplace=True)
-            base = base.merge(g[keep].drop_duplicates("Sample ID"), on="Sample ID", how="left")
+            base=base.merge(g[keep].drop_duplicates("Sample ID",keep="last"),on="Sample ID",how="left")
         else:
-            base["Detected organism"] = ""
-            base["AMR Finding"] = ""
-
-        if "Detected organism" not in base.columns: base["Detected organism"] = ""
-        if "AMR Finding" not in base.columns: base["AMR Finding"] = ""
-        if "AMRFinderPlus result" not in base.columns: base["AMRFinderPlus result"] = ""
-        if "Other information" not in base.columns: base["Other information"] = ""
-        if "MIC unit" not in base.columns: base["MIC unit"] = ""
-
-        # Conservative comparison: only flag a possible genotype/phenotype relationship
-        # when the genomic result contains a recognizable antibiotic/class keyword.
-        # This is a screening aid, not a clinical susceptibility call.
-        CLASS_KEYWORDS = {
-            "ciprofloxacin": ["fluoroquinolone", "quinolone", "ciprofloxacin"],
-            "levofloxacin": ["fluoroquinolone", "quinolone", "levofloxacin"],
-            "moxifloxacin": ["fluoroquinolone", "quinolone", "moxifloxacin"],
-            "ampicillin": ["beta-lactam", "beta lactam", "ampicillin", "penicillin"],
-            "amoxicillin": ["beta-lactam", "beta lactam", "amoxicillin", "penicillin"],
-            "ceftriaxone": ["beta-lactam", "beta lactam", "cephalosporin", "ceftriaxone"],
-            "cefotaxime": ["beta-lactam", "beta lactam", "cephalosporin", "cefotaxime"],
-            "meropenem": ["carbapenem", "beta-lactam", "beta lactam", "meropenem"],
-            "imipenem": ["carbapenem", "beta-lactam", "beta lactam", "imipenem"],
-            "gentamicin": ["aminoglycoside", "gentamicin"],
-            "amikacin": ["aminoglycoside", "amikacin"],
-            "streptomycin": ["aminoglycoside", "streptomycin"],
-            "tetracycline": ["tetracycline", "tet"],
-            "doxycycline": ["tetracycline", "doxycycline"],
-            "trimethoprim": ["trimethoprim", "sulfonamide"],
-            "sulfamethoxazole": ["sulfonamide", "sulfamethoxazole"],
-            "vancomycin": ["vancomycin", "glycopeptide"],
-            "linezolid": ["linezolid", "oxazolidinone"],
-            "erythromycin": ["macrolide", "erythromycin"],
-            "azithromycin": ["macrolide", "azithromycin"],
-            "chloramphenicol": ["chloramphenicol"],
-            "rifampicin": ["rifampin", "rifamycin", "rifampicin"],
-        }
+            base["Detected organism"]=""; base["AMR Finding"]=""; base["AMRFinderPlus result"]=""
 
         def classify(row):
-            finding = str(row.get("AMR Finding", "")).strip().lower()
-            raw_result = str(row.get("AMRFinderPlus result", "")).strip().lower()
-            evidence = f"{finding} {raw_result}"
-            ast = str(row.get("AST", "")).strip().lower()
-            antibiotic = str(row.get("Antibiotic", "")).strip().lower()
-            if not ast or ast in {"not provided", "nan", "none", ""}:
-                return "Insufficient data"
-            if not evidence or "no known amr determinant detected" in evidence:
-                return "Insufficient data"
-            keywords = CLASS_KEYWORDS.get(antibiotic, [antibiotic] if antibiotic else [])
-            relevant = any(k and k in evidence for k in keywords)
-
-            # Also recognize common AMRFinderPlus gene/family names that imply
-            # resistance to the same antibiotic class. This is a screening-level
-            # genotype/phenotype comparison, not a clinical susceptibility call.
-            gene_class_keywords = {
-                "ciprofloxacin": ["gyrA", "parC", "qnr", "aac(6')-Ib-cr", "quinolone"],
-                "levofloxacin": ["gyrA", "parC", "qnr", "quinolone"],
-                "moxifloxacin": ["gyrA", "parC", "qnr", "quinolone"],
-                "ampicillin": ["blaTEM", "blaSHV", "blaCTX-M", "blaOXA", "penicillinase", "beta-lactam"],
-                "amoxicillin": ["blaTEM", "blaSHV", "blaCTX-M", "blaOXA", "beta-lactam"],
-                "ceftriaxone": ["blaCTX-M", "blaSHV", "blaTEM", "blaCMY", "cephalosporin", "beta-lactam"],
-                "cefotaxime": ["blaCTX-M", "blaSHV", "blaTEM", "blaCMY", "cephalosporin", "beta-lactam"],
-                "meropenem": ["blaNDM", "blaKPC", "blaVIM", "blaIMP", "blaOXA-48", "carbapenem"],
-                "imipenem": ["blaNDM", "blaKPC", "blaVIM", "blaIMP", "blaOXA-48", "carbapenem"],
-                "gentamicin": ["aac", "aph", "ant", "aminoglycoside"],
-                "amikacin": ["aac", "aph", "ant", "aminoglycoside"],
-                "tetracycline": ["tet", "tetracycline"],
-                "doxycycline": ["tet", "tetracycline"],
-                "trimethoprim": ["dfr", "trimethoprim"],
-                "sulfamethoxazole": ["sul", "sulfamethoxazole", "sulfonamide"],
-                "vancomycin": ["vanA", "vanB", "vancomycin"],
-                "erythromycin": ["erm", "macrolide"],
-                "azithromycin": ["erm", "macrolide"],
+            evidence=f"{row.get('AMR Finding','')} {row.get('AMRFinderPlus result','')}".lower()
+            ast=str(row.get("AST","")).strip().lower()
+            antibiotic=str(row.get("Antibiotic","")).strip().lower()
+            if not ast or ast in {"not provided","nan","none",""}: return "Insufficient data"
+            if not evidence or "no known amr determinant detected" in evidence: return "Insufficient data"
+            keywords={
+                "ciprofloxacin":["fluoroquinolone","quinolone","ciprofloxacin","gyra","parc","qnr"],
+                "levofloxacin":["fluoroquinolone","quinolone","levofloxacin","gyra","parc","qnr"],
+                "ampicillin":["beta-lactam","beta lactam","blaTEM","blaSHV","blaCTX-M","blaOXA","penicillin"],
+                "amoxicillin":["beta-lactam","beta lactam","blaTEM","blaSHV","blaCTX-M","blaOXA"],
+                "ceftriaxone":["beta-lactam","beta lactam","cephalosporin","blaCTX-M","blaSHV","blaCMY"],
+                "cefotaxime":["beta-lactam","beta lactam","cephalosporin","blaCTX-M","blaSHV","blaCMY"],
+                "meropenem":["carbapenem","blaNDM","blaKPC","blaVIM","blaIMP","blaOXA-48"],
+                "imipenem":["carbapenem","blaNDM","blaKPC","blaVIM","blaIMP","blaOXA-48"],
+                "gentamicin":["aminoglycoside","aac","aph","ant"], "amikacin":["aminoglycoside","aac","aph","ant"],
+                "tetracycline":["tetracycline","tet"], "doxycycline":["tetracycline","tet"],
+                "trimethoprim":["trimethoprim","dfr"], "sulfamethoxazole":["sulfonamide","sul"],
+                "vancomycin":["vancomycin","glycopeptide","vanA","vanB"],
+                "erythromycin":["macrolide","erm"], "azithromycin":["macrolide","erm"]
             }
-            gene_keywords = gene_class_keywords.get(antibiotic, [])
-            relevant = relevant or any(k.lower() in evidence for k in gene_keywords)
+            relevant=any(k.lower() in evidence for k in keywords.get(antibiotic,[antibiotic] if antibiotic else []))
+            if not relevant: return "Requires interpretation"
+            if ast=="resistant": return "Potentially concordant"
+            if ast=="susceptible": return "Potentially discordant"
+            return "Requires interpretation"
 
-            if not relevant:
-                return "Requires interpretation"
-            if ast == "resistant":
-                return "Potentially concordant"
-            if ast == "susceptible":
-                return "Potentially discordant"
-            if ast == "intermediate":
-                return "Requires interpretation"
-            return "Insufficient data"
-
-        base["Comparison"] = base.apply(classify, axis=1)
-        out = base[columns].fillna("")
-        return out, f"Built comparative analysis for {len(out)} antibiotic test row(s)."
+        base["Comparison"]=base.apply(classify,axis=1)
+        return base[columns].fillna(""), f"Built comparative analysis for {len(base)} antibiotic test row(s)."
     except Exception as e:
-        return empty, f"Comparative analysis could not be built: {e}"
+        return empty,f"Comparative analysis could not be built: {e}"
 
 
 def compare_samples(data):
@@ -777,10 +575,9 @@ def compare_samples(data):
     return df[COMPARISON_COLUMNS]
 
 
-def run_comparative(genomic_data, ast_data, metadata_data):
-    result, message = build_comparative_analysis(genomic_data, ast_data, metadata_data)
-    summary = comparison_summary(result)
-    return result, message, summary
+def run_comparative(genomic_data, ast_data, metadata_data=None):
+    result,message=build_comparative_analysis(genomic_data,ast_data,None)
+    return result,message,comparison_summary(result)
 
 def comparison_summary(data):
     if data is None: return "### No comparison data entered."
@@ -809,22 +606,25 @@ def dashboard(data,sample_id):
 def make_mic_plot(data):
     try:
         import matplotlib.pyplot as plt
-        df=data.copy(); df["MIC"]=pd.to_numeric(df["MIC"],errors="coerce"); df=df.dropna(subset=["MIC"])
+        df=data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(data)
+        if df.empty or "MIC" not in df.columns or "Sample ID" not in df.columns: return None
+        df["MIC"]=pd.to_numeric(df["MIC"],errors="coerce"); df=df.dropna(subset=["MIC"])
         if df.empty: return None
-        fig,ax=plt.subplots(figsize=(9,5)); ax.bar(df["Sample ID"].astype(str),df["MIC"]); ax.set_title("MIC Comparison"); ax.set_xlabel("Sample"); ax.set_ylabel("MIC"); ax.tick_params(axis="x",rotation=45); fig.tight_layout(); return fig
+        fig,ax=plt.subplots(figsize=(9,5)); ax.bar(df["Sample ID"].astype(str),df["MIC"]); ax.set_title("MIC Comparison by Sample"); ax.set_xlabel("Sample"); ax.set_ylabel("MIC"); ax.tick_params(axis="x",rotation=45); fig.tight_layout(); return fig
     except Exception: return None
-
 
 def make_mic_ph_plot(data):
     try:
         import matplotlib.pyplot as plt
-        df=data.copy(); df["MIC"]=pd.to_numeric(df["MIC"],errors="coerce"); df["pH"]=pd.to_numeric(df["pH"],errors="coerce"); df=df.dropna(subset=["MIC","pH"])
+        df=data.copy() if isinstance(data,pd.DataFrame) else pd.DataFrame(data)
+        if df.empty or "MIC" not in df.columns or "pH" not in df.columns: return None
+        df["MIC"]=pd.to_numeric(df["MIC"],errors="coerce"); df["pH"]=pd.to_numeric(df["pH"],errors="coerce"); df=df.dropna(subset=["MIC","pH"])
         if df.empty: return None
         fig,ax=plt.subplots(figsize=(8,5)); ax.scatter(df["pH"],df["MIC"]); ax.set_title("MIC vs pH"); ax.set_xlabel("pH"); ax.set_ylabel("MIC"); fig.tight_layout(); return fig
     except Exception: return None
 
 
-HOME="""# 🧬 AMRIVA\n## Antimicrobial Resistance Genomic Analysis Platform\n\nAMRIVA connects **genomic AMR screening** with laboratory-provided AST/MIC and experimental information for research and education.\n\n### What AMRIVA provides\n- 🧬 FASTA genomic analysis\n- 🔬 AMRFinderPlus-based AMR screening\n- 📁 Batch analysis of any number of FASTA files in a ZIP\n- 🧪 AST and MIC entry\n- 🌡️ pH and temperature metadata\n- ⭐ Comparative analysis\n- 📋 Integrated sample dashboard\n- 📊 Data-based visualisation\n- 👩‍🔬 Women's Health & AMR research/education section\n\n> **AMRIVA is a research and educational prototype, not a clinical diagnostic system.**"""
+HOME="""# 🧬 AMRIVA\n## Antimicrobial Resistance Genomic Analysis Platform\n\nAMRIVA connects **genomic AMR screening** with laboratory-provided AST/MIC and experimental information for research and education.\n\n### What AMRIVA provides\n- 🧬 FASTA genomic analysis\n- 🔬 AMRFinderPlus-based AMR screening\n- 📁 Batch analysis of any number of FASTA files in a ZIP\n- 🧪 AST and MIC entry\n- 🌡️ pH and temperature recorded with AST/MIC rows\n- ⭐ Comparative analysis\n- 📋 Integrated sample dashboard\n- 📊 Data-based visualisation\n- 👩‍🔬 Women's Health & AMR research/education section\n\n> **AMRIVA is a research and educational prototype, not a clinical diagnostic system.**"""
 
 WOMEN="""# 👩‍🔬 Women's Health & AMR\n\nAMR is relevant to infections affecting women, including urinary tract infections and other areas of reproductive-health research.\n\nAMRIVA addresses the **Women in Science** theme through research and education around genomic AMR surveillance and appropriate public/research datasets.\n\n### Research areas\n- AMR in urinary tract infections\n- AMR surveillance relevant to women's health\n- Genomic surveillance of resistance determinants\n- Genotype–phenotype comparison using research datasets\n- Publicly available research datasets\n\n### Responsible scope\nThis student prototype does **not** diagnose patient vaginal, urine or blood samples, and it does not prescribe antibiotics. Real clinical testing requires appropriate laboratory, institutional, ethical and biosafety approvals."""
 
@@ -843,17 +643,17 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             gr.Markdown("## Single-Sample Analysis\nUpload one FASTA sequence for genomic AMR screening.")
             sf=gr.File(label="Upload FASTA",file_types=[".fa",".fasta",".fna"],type="filepath")
             sb=gr.Button("🧬 Analyse Sample",variant="primary"); ss=gr.Textbox(label="Analysis summary")
-            with gr.Row(): sid=gr.Textbox(label="Sample ID"); sorg=gr.Textbox(label="Detected organism (from FASTA metadata)")
+            with gr.Row(): sid=gr.Textbox(label="Sample ID"); sorg=gr.Textbox(label="Organism information")
             sfn=gr.Textbox(label="FASTA file")
             with gr.Row(): sl=gr.Textbox(label="Sequence length"); sgc=gr.Textbox(label="GC content"); sst=gr.Textbox(label="AMR status")
             with gr.Row(): sa=gr.Textbox(label="A"); sg=gr.Textbox(label="G"); sc=gr.Textbox(label="C"); st=gr.Textbox(label="T"); sn=gr.Textbox(label="N")
-            samr=gr.Dataframe(headers=AMRFINDER_DISPLAY_COLUMNS,interactive=False,wrap=True,label="AMRFinderPlus Result — detailed table (actual AMRFinderPlus output)"); sint=gr.Textbox(label="Genomic Interpretation",lines=6); sh=gr.Textbox(label="FASTA Header",visible=False)
+            samr=gr.Dataframe(headers=AMRFINDER_DISPLAY_COLUMNS,interactive=False,wrap=True,label="AMRFinderPlus Result — detailed table"); sint=gr.Textbox(label="Genomic Interpretation",lines=6); sh=gr.Textbox(label="FASTA Header",visible=False)
             sb.click(analyse_single_with_state,sf,[ss,sid,sorg,sfn,sl,sa,sg,sc,st,sn,sgc,sst,samr,sint,sh,genomic_state])
         with gr.Tab("📁 Multiple Samples"):
             gr.Markdown("## Batch Analysis\nUpload **one ZIP containing any number of FASTA files**. AMRIVA analyses every `.fa`, `.fasta` and `.fna` file automatically.")
             bz=gr.File(label="Upload ZIP containing FASTA files",file_types=[".zip"],type="filepath"); bb=gr.Button("📊 Analyse All Samples",variant="primary")
             bt=gr.Dataframe(headers=["Sample ID","Detected organism","FASTA file","Sequence length","GC content","AMR status","AMRFinderPlus result","Interpretation"],interactive=False,wrap=True, label="Batch genomic summary")
-            bdetail=gr.Dataframe(headers=AMRFINDER_DISPLAY_COLUMNS,interactive=False,wrap=True,label="AMRFinderPlus Result — detailed table (actual AMRFinderPlus output, separate from AMR status)")
+            bdetail=gr.Dataframe(headers=AMRFINDER_DISPLAY_COLUMNS,interactive=False,wrap=True,label="AMRFinderPlus Result — detailed table (separate from AMR status)")
             bb.click(analyse_zip_with_state,bz,[bt,genomic_state,bdetail])
         with gr.Tab("🧪 AST + MIC"):
             gr.Markdown("## 🧪 Phenotypic AST & MIC Data")
@@ -1032,50 +832,25 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             mic_calc.click(calculate_mic_series,[mic_series],[mic_results,mic_message])
 
             gr.Markdown("**Example:** 0.125 µg/mL → Growth; 0.25 → Growth; 0.5 → Growth; 1 → No growth. AMRIVA reports the MIC as 1 µg/mL based on the supplied observations. Clinical AST interpretation still requires the appropriate organism-, drug- and standard-specific breakpoint information.")
-        with gr.Tab("🌡️ Experimental Metadata"):
-            gr.Markdown("## 🌡️ Experimental Metadata")
-            gr.Markdown("Add laboratory/research information such as **pH and temperature**. AMRIVA does not determine these values from FASTA. These values can later be linked to the same Sample ID in Comparative Analysis.")
-
-            gr.Markdown("### 1️⃣ Quick entry — single or repeated samples")
-            with gr.Row():
-                meta_sample=gr.Textbox(label="Sample ID",placeholder="e.g. AMR-001")
-                meta_temp=gr.Textbox(label="Temperature (°C)",placeholder="e.g. 37")
-                meta_ph=gr.Textbox(label="pH",placeholder="e.g. 7.0")
-            with gr.Row():
-                meta_antibiotic=gr.Textbox(label="Antibiotic",placeholder="Optional")
-                meta_mic=gr.Textbox(label="MIC",placeholder="Optional")
-                meta_ast=gr.Dropdown(["Susceptible","Intermediate","Resistant","Not provided"],value="Not provided",label="AST")
-            meta_other=gr.Textbox(label="Other experimental/sample information",placeholder="Optional")
-            meta_add=gr.Button("＋ Add Experimental Data",variant="primary")
-            meta_message=gr.Markdown()
-            meta=gr.Dataframe(headers=["Sample ID","Temperature","pH","Antibiotic","MIC","AST","Other information"],value=[],datatype=["str"]*7,interactive=True,wrap=True,label="Experimental metadata — add as many samples as needed")
-            meta_add.click(add_metadata,[meta,meta_sample,meta_temp,meta_ph,meta_antibiotic,meta_mic,meta_ast,meta_other],[meta,meta_message])
-
-            gr.Markdown("### 2️⃣ Multiple-sample upload")
-            gr.Markdown("Upload a CSV containing **any number of samples**. Recommended columns: `Sample ID, Temperature, pH, Antibiotic, MIC, AST, Other information`.")
-            meta_csv=gr.File(label="Upload experimental metadata CSV or Excel",file_types=[".csv",".xlsx",".xls"],type="filepath")
-            meta_csv_button=gr.Button("📥 Load Multiple-Sample Metadata")
-            meta_csv_message=gr.Markdown()
-            meta_csv_button.click(load_metadata_csv,meta_csv,[meta,meta_csv_message])
         with gr.Tab("⭐ Comparative Analysis"):
             gr.Markdown("## ⭐ Comparative Analysis")
-            gr.Markdown("AMRIVA combines **genomic AMR screening + phenotypic AST/MIC + pH + temperature** using the common **Sample ID**. Add AST/MIC and metadata first, then run the comparison.")
+            gr.Markdown("AMRIVA combines **genomic AMR screening + phenotypic AST/MIC + pH + temperature** using the common **Sample ID**. Add AST/MIC rows first, then run the comparison.")
             gr.Markdown("### Data sources")
-            gr.Markdown("The genomic source comes from the FASTA/ZIP analysis in this browser session. AST/MIC and experimental metadata come from the tables in their respective tabs.")
+            gr.Markdown("The genomic source comes from the FASTA/ZIP analysis in this browser session. AST/MIC, MIC and pH/temperature values come from the AST + MIC table.")
             cb=gr.Button("⭐ Build Comparative Analysis",variant="primary")
             cmsg=gr.Markdown()
             co=gr.Dataframe(headers=["Sample ID","Detected organism","AMR Finding","AMRFinderPlus result","Antibiotic","MIC","MIC unit","AST","pH","Temperature","Other information","Comparison"],interactive=False,wrap=True,label="Integrated Genotype–Phenotype Comparison")
             cs=gr.Markdown()
-            cb.click(run_comparative,[genomic_state,ast_table,meta],[co,cmsg,cs])
+            cb.click(run_comparative,[genomic_state,ast_table],[co,cmsg,cs])
             gr.Markdown("**Comparison status is conservative:** 🟢 Potentially concordant means the supplied genomic evidence contains a recognizable antibiotic/class relationship and the supplied AST says Resistant. 🟠 Potentially discordant means the genomic evidence is relevant but AST says Susceptible. 🟡 Requires interpretation means the relationship cannot be established safely from the supplied data. These are not clinical diagnostic calls.")
         with gr.Tab("📋 Sample Dashboard"):
             gr.Markdown("## 📋 Integrated Sample Dashboard\nEnter a sample ID to view its combined information.")
             dd=gr.Dataframe(headers=COMPARISON_COLUMNS,interactive=True,wrap=True); ds=gr.Textbox(label="Sample ID"); db=gr.Button("📋 View Dashboard",variant="primary"); dout=gr.Markdown(); db.click(dashboard,[dd,ds],dout)
         with gr.Tab("📊 Visualisation"):
             gr.Markdown("## 📊 Data Visualisation\nOnly actual user-provided measurements are visualised.")
-            gd=gr.Dataframe(headers=["Sample ID","AMR Finding","Antibiotic","MIC","AST","pH","Temperature"],interactive=True,wrap=True)
-            g1b=gr.Button("📊 Generate MIC Comparison"); g1=gr.Plot(label="MIC Comparison"); g1b.click(make_mic_plot,gd,g1)
-            g2b=gr.Button("📈 Generate MIC vs pH"); g2=gr.Plot(label="MIC vs pH"); g2b.click(make_mic_ph_plot,gd,g2)
+            gr.Markdown("The plots use the AST + MIC table directly, so you do not need to copy data into another table.")
+            g1b=gr.Button("📊 Generate MIC Comparison",variant="primary"); g1=gr.Plot(label="MIC Comparison"); g1b.click(make_mic_plot,ast_table,g1)
+            g2b=gr.Button("📈 Generate MIC vs pH",variant="primary"); g2=gr.Plot(label="MIC vs pH"); g2b.click(make_mic_ph_plot,ast_table,g2)
         with gr.Tab("🤖 AMRIVA Research Assistant"):
             gr.Markdown("## 🤖 AMRIVA Research Assistant")
             gr.Markdown("Ask educational questions about AMR, AST, MIC, genomic screening or the AMRIVA workflow. The assistant is educational and does not diagnose patients, prescribe antibiotics or replace laboratory interpretation.")
