@@ -53,6 +53,96 @@ def calculate_statistics(sequence):
     return {"sequence":seq,"length":n,"A":a,"G":g,"C":c,"T":t,"N":unknown,"GC":(g+c)/n*100}
 
 
+AMRFINDER_DISPLAY_COLUMNS = [
+    "Sample ID", "Gene symbol", "Sequence name", "Element type",
+    "Element subtype", "Class", "Subclass", "Method",
+    "% Coverage", "% Identity", "Accession of closest sequence",
+    "Name of closest sequence"
+]
+
+
+def _amrfinder_dataframe(sample_id, raw_result):
+    """Parse AMRFinderPlus TSV output into a clean display dataframe.
+
+    AMRFinderPlus writes tab-separated output. We keep the original information
+    where available and only select known display columns. If the output is an
+    error/no-hit message, return a one-row status table instead of pretending
+    that no result was produced.
+    """
+    text = str(raw_result or "").strip()
+    empty = pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS)
+    if not text or text.startswith("No known AMR determinant detected"):
+        return empty
+    if text.startswith("AMRFinderPlus analysis failed") or text.startswith("AMRFinderPlus was not found"):
+        return empty
+
+    try:
+        from io import StringIO
+        df = pd.read_csv(StringIO(text), sep="\t", dtype=str, keep_default_na=False)
+        if df.empty:
+            return empty
+        # Normalise common AMRFinderPlus header spellings.
+        aliases = {
+            "Gene symbol": "Gene symbol",
+            "Sequence name": "Sequence name",
+            "Element type": "Element type",
+            "Element subtype": "Element subtype",
+            "Class": "Class",
+            "Subclass": "Subclass",
+            "Method": "Method",
+            "% Coverage of reference sequence": "% Coverage",
+            "% Identity to reference sequence": "% Identity",
+            "Accession of closest sequence": "Accession of closest sequence",
+            "Name of closest sequence": "Name of closest sequence",
+        }
+        df = df.rename(columns={c: aliases.get(str(c).strip(), str(c).strip()) for c in df.columns})
+        for col in AMRFINDER_DISPLAY_COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+        df.insert(0, "Sample ID", str(sample_id)) if "Sample ID" not in df.columns else None
+        return df[["Sample ID"] + [c for c in AMRFINDER_DISPLAY_COLUMNS if c != "Sample ID"]].copy()
+    except Exception:
+        # Do not lose a valid result just because a future AMRFinderPlus version
+        # changes a header. Try a headerless TSV fallback.
+        try:
+            from io import StringIO
+            raw = pd.read_csv(StringIO(text), sep="\t", header=None, dtype=str, keep_default_na=False)
+            if raw.empty:
+                return empty
+            # Standard AMRFinderPlus output has many columns. Keep the first
+            # available fields and expose them with safe labels.
+            n = min(raw.shape[1], 12)
+            out = pd.DataFrame({
+                "Sample ID": [str(sample_id)] * len(raw),
+                "Gene symbol": raw.iloc[:, 5] if n > 5 else "",
+                "Sequence name": raw.iloc[:, 6] if n > 6 else "",
+                "Element type": raw.iloc[:, 8] if n > 8 else "",
+                "Element subtype": raw.iloc[:, 9] if n > 9 else "",
+                "Class": raw.iloc[:, 10] if n > 10 else "",
+                "Subclass": raw.iloc[:, 11] if n > 11 else "",
+            })
+            for c in AMRFINDER_DISPLAY_COLUMNS:
+                if c not in out.columns:
+                    out[c] = ""
+            return out[AMRFINDER_DISPLAY_COLUMNS]
+        except Exception:
+            return empty
+
+
+def _amrfinder_determinants(parsed):
+    """Return a concise determinant summary for the AMR status column."""
+    if parsed is None or parsed.empty:
+        return ""
+    vals=[]
+    for _, row in parsed.iterrows():
+        gene=str(row.get("Gene symbol", "")).strip()
+        seq=str(row.get("Sequence name", "")).strip()
+        value=gene or seq
+        if value and value not in vals:
+            vals.append(value)
+    return ", ".join(vals)
+
+
 def run_amrfinder(fasta_file, amrfinder_organism=None):
     cmd=["amrfinder","-n",fasta_file]
     if amrfinder_organism: cmd += ["-O",amrfinder_organism]
@@ -66,12 +156,15 @@ def run_amrfinder(fasta_file, amrfinder_organism=None):
     except Exception as e: return False,f"AMRFinderPlus analysis failed: {e}"
 
 
-def interpret_amr(success, result):
+def interpret_amr(success, result, parsed=None):
     if not success:
-        return "AMR analysis could not be completed", "Susceptibility cannot be inferred because genomic AMR analysis did not complete. Validated phenotypic AST is required for confirmation."
-    if result.startswith("No known AMR determinant detected"):
-        return "No known AMR determinant detected", "No known genomic AMR determinant was detected by this screening. This does not prove susceptibility. Phenotypic AST is required."
-    return "AMR determinant(s) detected", "Detected genomic determinants may be associated with antimicrobial resistance. Absence of a detected resistance determinant does not prove susceptibility. Phenotypic AST is required for clinical confirmation."
+        return "AMR analysis could not be completed", "AMRFinderPlus did not complete successfully. Susceptibility cannot be inferred from this genomic analysis. Validated phenotypic AST is required for confirmation."
+    if parsed is None:
+        parsed = pd.DataFrame()
+    determinants = _amrfinder_determinants(parsed)
+    if parsed.empty:
+        return "No known AMR determinant detected", "AMRFinderPlus did not report a known AMR determinant in this sequence. This does not prove susceptibility. Phenotypic AST is required for confirmation."
+    return f"AMR determinant(s) detected: {determinants}", "AMRFinderPlus detected the determinant(s) listed in the result table. These genomic findings may be associated with antimicrobial resistance; they do not by themselves establish phenotypic resistance. Phenotypic AST remains important for confirmation."
 
 
 def analyse_single(fasta_file):
@@ -84,11 +177,15 @@ def analyse_single(fasta_file):
         organism,org=detect_organism(header,filename)
         stats=calculate_statistics(seq)
         success,result=run_amrfinder(fasta_file,org)
-        status,interpretation=interpret_amr(success,result)
         sample_id=header.split()[0] if header else os.path.splitext(filename)[0]
-        return ("Sample analysed successfully.",sample_id,organism,filename,str(stats["length"]),str(stats["A"]),str(stats["G"]),str(stats["C"]),str(stats["T"]),str(stats["N"]),f'{stats["GC"]:.2f}%',status,result,interpretation,header)
+        parsed=_amrfinder_dataframe(sample_id,result) if success else pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS)
+        status,interpretation=interpret_amr(success,result,parsed)
+        # The result field is now a concise determinant summary; the complete
+        # AMRFinderPlus output is shown separately as a dataframe in the UI.
+        result_summary = _amrfinder_determinants(parsed) if not parsed.empty else ("No known AMR determinant detected." if success else result)
+        return ("Sample analysed successfully.",sample_id,organism,filename,str(stats["length"]),str(stats["A"]),str(stats["G"]),str(stats["C"]),str(stats["T"]),str(stats["N"]),f'{stats["GC"]:.2f}%',status,result_summary,interpretation,header,parsed)
     except Exception as e:
-        return (f"Analysis error: {e}",)+empty[:10]+("Analysis failed","","")+empty[-1:]
+        return (f"Analysis error: {e}",)+empty[:10]+("Analysis failed","","")+empty[-1:]+(pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS),)
 
 
 def extract_fasta_files(zip_path,folder):
@@ -106,6 +203,8 @@ def extract_fasta_files(zip_path,folder):
     return files
 
 
+_LAST_BATCH_AMRFINDER_DETAILS = pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS)
+
 def analyse_zip(zip_file):
     cols=["Sample ID","Detected organism","FASTA file","Sequence length","GC content","AMR status","AMRFinderPlus result","Interpretation"]
     empty=pd.DataFrame(columns=cols)
@@ -118,16 +217,25 @@ def analyse_zip(zip_file):
         if not files:
             return pd.DataFrame([{"Sample ID":"ERROR","Detected organism":"N/A","FASTA file":"No FASTA files found","Sequence length":"N/A","GC content":"N/A","AMR status":"No FASTA files","AMRFinderPlus result":"No .fa, .fasta or .fna files were found inside the ZIP.","Interpretation":"Upload a ZIP containing one or more FASTA files."}],columns=cols)
         rows=[]
+        detail_frames=[]
         for i,path in enumerate(files,1):
             name=os.path.basename(path)
             try:
                 header,seq=read_fasta(path)
+                sid=header.split()[0] if header else os.path.splitext(name)[0]
                 if not seq:
-                    rows.append({"Sample ID":f"AMR-BATCH-{i:03d}","Detected organism":"Unknown","FASTA file":name,"Sequence length":"0","GC content":"N/A","AMR status":"Invalid FASTA","AMRFinderPlus result":"No nucleotide sequence found.","Interpretation":"Analysis could not be performed."}); continue
-                organism,org=detect_organism(header,name); stats=calculate_statistics(seq); success,result=run_amrfinder(path,org); status,interpretation=interpret_amr(success,result); sid=header.split()[0] if header else os.path.splitext(name)[0]
-                rows.append({"Sample ID":sid,"Detected organism":organism,"FASTA file":name,"Sequence length":stats["length"],"GC content":f'{stats["GC"]:.2f}%',"AMR status":status,"AMRFinderPlus result":result,"Interpretation":interpretation})
+                    rows.append({"Sample ID":sid,"Detected organism":"Unknown","FASTA file":name,"Sequence length":"0","GC content":"N/A","AMR status":"Invalid FASTA","AMRFinderPlus result":"No nucleotide sequence found.","Interpretation":"Analysis could not be performed."}); continue
+                organism,org=detect_organism(header,name); stats=calculate_statistics(seq); success,result=run_amrfinder(path,org)
+                parsed=_amrfinder_dataframe(sid,result) if success else pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS)
+                if isinstance(parsed, pd.DataFrame) and not parsed.empty:
+                    detail_frames.append(parsed)
+                status,interpretation=interpret_amr(success,result,parsed)
+                determinant_summary=_amrfinder_determinants(parsed) if not parsed.empty else ("No known AMR determinant detected." if success else result)
+                rows.append({"Sample ID":sid,"Detected organism":organism,"FASTA file":name,"Sequence length":stats["length"],"GC content":f'{stats["GC"]:.2f}%',"AMR status":status,"AMRFinderPlus result":determinant_summary,"Interpretation":interpretation})
             except Exception as e:
                 rows.append({"Sample ID":f"AMR-BATCH-{i:03d}","Detected organism":"Unknown","FASTA file":name,"Sequence length":"Error","GC content":"Error","AMR status":"Analysis failed","AMRFinderPlus result":str(e),"Interpretation":"Analysis could not be completed."})
+        global _LAST_BATCH_AMRFINDER_DETAILS
+        _LAST_BATCH_AMRFINDER_DETAILS = pd.concat(detail_frames, ignore_index=True) if detail_frames else pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS)
         return pd.DataFrame(rows,columns=cols)
     except Exception as e:
         return pd.DataFrame([{"Sample ID":"ERROR","Detected organism":"N/A","FASTA file":"ZIP processing","Sequence length":"N/A","GC content":"N/A","AMR status":"Batch analysis failed","AMRFinderPlus result":str(e),"Interpretation":"The ZIP could not be processed."}],columns=cols)
@@ -381,21 +489,30 @@ def load_metadata_csv(csv_file):
 
 def analyse_single_with_state(fasta_file):
     result = analyse_single(fasta_file)
-    # analyse_single returns summary + 14 fields. Keep a compact genomic record for comparison.
-    if not fasta_file or result[1] == "":
-        return (*result, pd.DataFrame(columns=["Sample ID","Detected organism","AMR status","AMRFinderPlus result"]))
+    empty_genomic = pd.DataFrame(columns=["Sample ID","Detected organism","AMR status","AMR Finding","AMRFinderPlus result"])
+    empty_detail = pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS)
+    if not fasta_file or len(result) < 16 or result[1] == "":
+        base = list(result[:15])
+        if len(base) >= 13: base[12] = empty_detail
+        return (*base, empty_genomic)
+    parsed=result[15]
+    determinant_summary=_amrfinder_determinants(parsed) if isinstance(parsed,pd.DataFrame) and not parsed.empty else result[12]
     genomic = pd.DataFrame([{
         "Sample ID": result[1],
         "Detected organism": result[2],
         "AMR status": result[11],
-        "AMRFinderPlus result": result[12]
+        "AMR Finding": determinant_summary,
+        "AMRFinderPlus result": determinant_summary
     }])
-    return (*result, genomic)
+    base=list(result[:15])
+    base[12]=parsed
+    return (*base, genomic)
 
 
 def analyse_zip_with_state(zip_file):
+    global _LAST_BATCH_AMRFINDER_DETAILS
     df = analyse_zip(zip_file)
-    return df, df.copy()
+    return df, df.copy(), _LAST_BATCH_AMRFINDER_DETAILS.copy()
 
 
 def _normalise_columns(df, aliases):
@@ -676,12 +793,14 @@ with gr.Blocks(title="AMRIVA",css=CSS,theme=gr.themes.Soft()) as demo:
             sfn=gr.Textbox(label="FASTA file")
             with gr.Row(): sl=gr.Textbox(label="Sequence length"); sgc=gr.Textbox(label="GC content"); sst=gr.Textbox(label="AMR status")
             with gr.Row(): sa=gr.Textbox(label="A"); sg=gr.Textbox(label="G"); sc=gr.Textbox(label="C"); st=gr.Textbox(label="T"); sn=gr.Textbox(label="N")
-            samr=gr.Textbox(label="AMRFinderPlus Result",lines=14); sint=gr.Textbox(label="Genomic Interpretation",lines=6); sh=gr.Textbox(label="FASTA Header",visible=False)
+            samr=gr.Dataframe(headers=AMRFINDER_DISPLAY_COLUMNS,interactive=False,wrap=True,label="AMRFinderPlus Result — detailed table"); sint=gr.Textbox(label="Genomic Interpretation",lines=6); sh=gr.Textbox(label="FASTA Header",visible=False)
             sb.click(analyse_single_with_state,sf,[ss,sid,sorg,sfn,sl,sa,sg,sc,st,sn,sgc,sst,samr,sint,sh,genomic_state])
         with gr.Tab("📁 Multiple Samples"):
             gr.Markdown("## Batch Analysis\nUpload **one ZIP containing any number of FASTA files**. AMRIVA analyses every `.fa`, `.fasta` and `.fna` file automatically.")
             bz=gr.File(label="Upload ZIP containing FASTA files",file_types=[".zip"],type="filepath"); bb=gr.Button("📊 Analyse All Samples",variant="primary")
-            bt=gr.Dataframe(headers=["Sample ID","Detected organism","FASTA file","Sequence length","GC content","AMR status","AMRFinderPlus result","Interpretation"],interactive=False,wrap=True); bb.click(analyse_zip_with_state,bz,[bt,genomic_state])
+            bt=gr.Dataframe(headers=["Sample ID","Detected organism","FASTA file","Sequence length","GC content","AMR status","AMRFinderPlus result","Interpretation"],interactive=False,wrap=True, label="Batch genomic summary")
+            bdetail=gr.Dataframe(headers=AMRFINDER_DISPLAY_COLUMNS,interactive=False,wrap=True,label="AMRFinderPlus Result — detailed table (separate from AMR status)")
+            bb.click(analyse_zip_with_state,bz,[bt,genomic_state,bdetail])
         with gr.Tab("🧪 AST + MIC"):
             gr.Markdown("## 🧪 Phenotypic AST & MIC Data")
             gr.Markdown("Enter **laboratory-generated** susceptibility results. AMRIVA does not perform the wet-lab test or infer AST/MIC from a FASTA sequence.")
