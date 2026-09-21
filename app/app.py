@@ -54,80 +54,112 @@ def calculate_statistics(sequence):
 
 
 AMRFINDER_DISPLAY_COLUMNS = [
-    "Sample ID", "Gene symbol", "Sequence name", "Element type",
-    "Element subtype", "Class", "Subclass", "Method",
-    "% Coverage", "% Identity", "Accession of closest sequence",
-    "Name of closest sequence"
+    "Sample ID", "AMR Gene", "Protein / Function", "Resistance Class",
+    "Identity (%)", "Coverage (%)"
 ]
 
 
 def _amrfinder_dataframe(sample_id, raw_result):
-    """Parse AMRFinderPlus TSV output into a clean display dataframe.
+    """Convert AMRFinderPlus TSV output into the compact AMRIVA table.
 
-    AMRFinderPlus writes tab-separated output. We keep the original information
-    where available and only select known display columns. If the output is an
-    error/no-hit message, return a one-row status table instead of pretending
-    that no result was produced.
+    AMRIVA keeps the detailed AMRFinderPlus evidence separate from the batch
+    summary. When AMRFinderPlus reports no hit, a visible placeholder row is
+    returned instead of leaving the table completely blank.
     """
+    sid = str(sample_id or "").strip()
     text = str(raw_result or "").strip()
-    empty = pd.DataFrame(columns=AMRFINDER_DISPLAY_COLUMNS)
-    if not text or text.startswith("No known AMR determinant detected"):
-        return empty
+    empty_cols = AMRFINDER_DISPLAY_COLUMNS
+
+    def no_hit():
+        return pd.DataFrame([{
+            "Sample ID": sid,
+            "AMR Gene": "—",
+            "Protein / Function": "—",
+            "Resistance Class": "—",
+            "Identity (%)": "—",
+            "Coverage (%)": "—",
+        }], columns=empty_cols)
+
+    if not text:
+        return no_hit()
+    if text.startswith("No known AMR determinant detected"):
+        return no_hit()
     if text.startswith("AMRFinderPlus analysis failed") or text.startswith("AMRFinderPlus was not found"):
-        return empty
+        return no_hit()
 
     try:
         from io import StringIO
         df = pd.read_csv(StringIO(text), sep="\t", dtype=str, keep_default_na=False)
         if df.empty:
-            return empty
-        # Normalise common AMRFinderPlus header spellings.
+            return no_hit()
+
+        # AMRFinderPlus standard TSV names.
         aliases = {
-            "Gene symbol": "Gene symbol",
-            "Sequence name": "Sequence name",
-            "Element type": "Element type",
-            "Element subtype": "Element subtype",
-            "Class": "Class",
-            "Subclass": "Subclass",
-            "Method": "Method",
-            "% Coverage of reference sequence": "% Coverage",
-            "% Identity to reference sequence": "% Identity",
-            "Accession of closest sequence": "Accession of closest sequence",
-            "Name of closest sequence": "Name of closest sequence",
+            "Gene symbol": "AMR Gene",
+            "Element symbol": "AMR Gene",
+            "Sequence name": "Protein / Function",
+            "HMM description": "Protein / Function",
+            "Class": "Resistance Class",
+            "% Identity to reference sequence": "Identity (%)",
+            "% Coverage of reference sequence": "Coverage (%)",
+            "% Identity": "Identity (%)",
+            "% Coverage": "Coverage (%)",
         }
-        df = df.rename(columns={c: aliases.get(str(c).strip(), str(c).strip()) for c in df.columns})
-        for col in AMRFINDER_DISPLAY_COLUMNS:
-            if col not in df.columns:
-                df[col] = ""
-        df.insert(0, "Sample ID", str(sample_id)) if "Sample ID" not in df.columns else None
-        return df[["Sample ID"] + [c for c in AMRFINDER_DISPLAY_COLUMNS if c != "Sample ID"]].copy()
+        df = df.rename(columns={str(c).strip(): aliases.get(str(c).strip(), str(c).strip()) for c in df.columns})
+
+        # If AMRFinderPlus has a different version's naming, use sensible
+        # fallbacks rather than dropping the valid hit.
+        if "AMR Gene" not in df.columns:
+            for c in df.columns:
+                lc = str(c).lower()
+                if "gene" in lc and "symbol" in lc:
+                    df["AMR Gene"] = df[c]
+                    break
+        if "Protein / Function" not in df.columns:
+            for c in df.columns:
+                lc = str(c).lower()
+                if "sequence name" in lc or "description" in lc:
+                    df["Protein / Function"] = df[c]
+                    break
+        if "Resistance Class" not in df.columns and "Class" in df.columns:
+            df["Resistance Class"] = df["Class"]
+
+        for c in empty_cols:
+            if c not in df.columns:
+                df[c] = ""
+
+        out = df[empty_cols].copy()
+        out.insert(0, "Sample ID", sid) if "Sample ID" not in out.columns else None
+        # Replace genuinely empty cells with an em dash for readable results.
+        for c in empty_cols[1:]:
+            out[c] = out[c].astype(str).replace({"": "—", "nan": "—", "None": "—"})
+        return out[empty_cols]
+
     except Exception:
-        # Do not lose a valid result just because a future AMRFinderPlus version
-        # changes a header. Try a headerless TSV fallback.
+        # Headerless fallback for older/variant AMRFinderPlus output.
         try:
             from io import StringIO
             raw = pd.read_csv(StringIO(text), sep="\t", header=None, dtype=str, keep_default_na=False)
             if raw.empty:
-                return empty
-            # Standard AMRFinderPlus output has many columns. Keep the first
-            # available fields and expose them with safe labels.
-            n = min(raw.shape[1], 12)
+                return no_hit()
+            # Standard AMRFinderPlus positional layout has Gene symbol around
+            # column 5 and Sequence name around column 6. Locate Class and
+            # identity/coverage by their standard positions when available.
+            def val(i):
+                return raw.iloc[:, i].astype(str) if i < raw.shape[1] else pd.Series(["—"] * len(raw))
             out = pd.DataFrame({
-                "Sample ID": [str(sample_id)] * len(raw),
-                "Gene symbol": raw.iloc[:, 5] if n > 5 else "",
-                "Sequence name": raw.iloc[:, 6] if n > 6 else "",
-                "Element type": raw.iloc[:, 8] if n > 8 else "",
-                "Element subtype": raw.iloc[:, 9] if n > 9 else "",
-                "Class": raw.iloc[:, 10] if n > 10 else "",
-                "Subclass": raw.iloc[:, 11] if n > 11 else "",
+                "Sample ID": [sid] * len(raw),
+                "AMR Gene": val(5),
+                "Protein / Function": val(6),
+                "Resistance Class": val(10),
+                "Identity (%)": val(16),
+                "Coverage (%)": val(15),
             })
-            for c in AMRFINDER_DISPLAY_COLUMNS:
-                if c not in out.columns:
-                    out[c] = ""
-            return out[AMRFINDER_DISPLAY_COLUMNS]
+            for c in empty_cols[1:]:
+                out[c] = out[c].replace({"": "—", "nan": "—", "None": "—"})
+            return out[empty_cols]
         except Exception:
-            return empty
-
+            return no_hit()
 
 def _amrfinder_determinants(parsed):
     """Return a concise determinant summary for the AMR status column."""
@@ -135,7 +167,7 @@ def _amrfinder_determinants(parsed):
         return ""
     vals=[]
     for _, row in parsed.iterrows():
-        gene=str(row.get("Gene symbol", "")).strip()
+        gene=str(row.get("AMR Gene", row.get("Gene symbol", ""))).strip()
         seq=str(row.get("Sequence name", "")).strip()
         value=gene or seq
         if value and value not in vals:
