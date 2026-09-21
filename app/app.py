@@ -1,316 +1,396 @@
-
-import os, re, json, zipfile, shutil, subprocess, tempfile, uuid
-from pathlib import Path
+import os
+import zipfile
+import tempfile
+import shutil
+import subprocess
+from io import StringIO
 import pandas as pd
 import gradio as gr
 
 APP_NAME = "AMRIVA"
-WORK = Path(tempfile.gettempdir()) / "amriva"
-WORK.mkdir(parents=True, exist_ok=True)
-EVIDENCE = {}
 
-FASTA_EXTS = {".fa", ".fasta", ".fna", ".fas"}
+DETAIL_COLUMNS = [
+    "Sample ID", "Organism", "AMR determinant", "Sequence / Element name",
+    "Class", "Subclass", "Mechanism / Product", "Method",
+    "Identity (%)", "Coverage (%)", "Contig", "Start", "Stop",
+    "Reference", "Raw result"
+]
 
-def clean_sample_id(name):
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(name).stem)
+RAW_FIELDS = [
+    "Protein id", "Contig id", "Start", "Stop", "Strand", "Element symbol",
+    "Element name", "Scope", "Type", "Subtype", "Class", "Subclass", "Method",
+    "Target length", "Reference sequence length", "% Coverage of reference",
+    "% Identity to reference", "Alignment length", "Closest reference name",
+    "HMM accession", "HMM description", "Reference accession"
+]
+
+ORGANISM_MAP = {
+    "escherichia coli": "Escherichia coli", "e. coli": "Escherichia coli",
+    "klebsiella pneumoniae": "Klebsiella pneumoniae",
+    "pseudomonas aeruginosa": "Pseudomonas aeruginosa",
+    "acinetobacter baumannii": "Acinetobacter baumannii",
+    "staphylococcus aureus": "Staphylococcus aureus",
+    "enterococcus faecalis": "Enterococcus faecalis",
+    "enterococcus faecium": "Enterococcus faecium",
+    "salmonella": "Salmonella spp.", "campylobacter": "Campylobacter spp.",
+    "serratia marcescens": "Serratia marcescens",
+}
+
+
+def clean(v):
+    if v is None:
+        return ""
+    s = str(v).strip()
+    return "" if s.lower() in {"nan", "none", "<na>", "na"} else s
+
 
 def read_fasta_records(path):
     records = []
     header = None
-    seq = []
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
+    parts = []
+    with open(path, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
             if not line:
                 continue
             if line.startswith(">"):
                 if header is not None:
-                    records.append((header, "".join(seq)))
+                    records.append((header, "".join(parts).upper()))
                 header = line[1:].strip()
-                seq = []
+                parts = []
             else:
-                seq.append(re.sub(r"\s+", "", line).upper())
-        if header is not None:
-            records.append((header, "".join(seq)))
+                parts.append(line)
+    if header is not None:
+        records.append((header, "".join(parts).upper()))
     return records
 
-def sequence_stats(path):
-    records = read_fasta_records(path)
-    seq = "".join(s for _, s in records).upper()
-    counts = {b: seq.count(b) for b in "ACGTN"}
-    valid = counts["A"] + counts["C"] + counts["G"] + counts["T"]
-    gc = ((counts["G"] + counts["C"]) / valid * 100) if valid else 0
-    return len(records), len(seq), counts, gc
 
-def safe_extract_zip(zip_path, outdir):
-    outdir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path, "r") as z:
-        for info in z.infolist():
-            target = (outdir / info.filename).resolve()
-            if not str(target).startswith(str(outdir.resolve()) + os.sep):
-                raise ValueError("Unsafe ZIP path detected.")
-            if info.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(info) as src, open(target, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-
-def collect_fastas(files):
-    root = WORK / str(uuid.uuid4())
-    inputdir = root / "inputs"
-    inputdir.mkdir(parents=True)
-    paths = []
-    for item in files or []:
-        p = Path(item)
-        if p.suffix.lower() == ".zip":
-            zdir = inputdir / clean_sample_id(p.name)
-            safe_extract_zip(p, zdir)
-            paths.extend([x for x in zdir.rglob("*") if x.is_file() and x.suffix.lower() in FASTA_EXTS])
-        elif p.suffix.lower() in FASTA_EXTS:
-            dest = inputdir / p.name
-            shutil.copy2(p, dest)
-            paths.append(dest)
-    # Deduplicate by resolved path
-    return root, sorted(set(x.resolve() for x in paths))
-
-def amrfinder_available():
-    try:
-        r = subprocess.run(["amrfinder", "--version"], capture_output=True, text=True, timeout=30)
-        return r.returncode == 0, (r.stdout + r.stderr).strip()
-    except Exception as e:
-        return False, str(e)
-
-def parse_amr_tsv(tsv_path):
-    if not tsv_path.exists() or tsv_path.stat().st_size == 0:
-        return pd.DataFrame()
-    # AMRFinderPlus emits tab-delimited output; comment lines are ignored.
-    try:
-        df = pd.read_csv(tsv_path, sep="\t", dtype=str, comment="#", keep_default_na=False)
-    except Exception:
-        df = pd.read_csv(tsv_path, sep="\t", dtype=str, keep_default_na=False)
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
-
-def first_col(df, names):
-    low = {str(c).lower(): c for c in df.columns}
-    for n in names:
-        if n.lower() in low:
-            return low[n.lower()]
-    return None
-
-def normalize(df, sample_id):
-    if df.empty:
-        return pd.DataFrame(columns=[
-            "Sample ID","Organism","AMR determinant","Class","Subclass",
-            "Mechanism / Product","Method","Identity (%)","Coverage (%)",
-            "Sequence / Contig","Start","Stop","Reference","Raw result"
-        ])
-    def val(names):
-        c = first_col(df, names)
-        return df[c] if c else pd.Series([""] * len(df), index=df.index)
-    out = pd.DataFrame(index=df.index)
-    out["Sample ID"] = sample_id
-    out["Organism"] = val(["organism","Organism"])
-    out["AMR determinant"] = val(["gene_symbol","Gene symbol","gene","Gene"])
-    out["Class"] = val(["class","Class"])
-    out["Subclass"] = val(["subclass","Subclass"])
-    out["Mechanism / Product"] = val(["product","Product","mechanism","Mechanism"])
-    out["Method"] = val(["method","Method","amr_method"])
-    out["Identity (%)"] = val(["%identity","% Identity","identity"])
-    out["Coverage (%)"] = val(["%coverage","% Coverage","coverage"])
-    out["Sequence / Contig"] = val(["contig_name","Contig","sequence","Sequence name","name"])
-    out["Start"] = val(["start","Start","start_on_contig"])
-    out["Stop"] = val(["stop","Stop","end","stop_on_contig"])
-    out["Reference"] = val(["closest_reference","Closest reference","accession","Accession","closest_reference_name"])
-    out["Raw result"] = df.apply(lambda r: " | ".join(f"{c}={r[c]}" for c in df.columns if str(r[c]).strip()), axis=1)
-    return out.reset_index(drop=True)
-
-def find_sequence_evidence(nuc_fasta, sample_id):
-    if not nuc_fasta or not nuc_fasta.exists():
-        return {}
-    evidence = {}
-    current = None
-    seq = []
-    for h, s in read_fasta_records(nuc_fasta):
-        evidence[h] = s
-    return evidence
-
-def run_one(path, organism):
-    sample_id = clean_sample_id(path.name)
-    outdir = WORK / str(uuid.uuid4())
-    outdir.mkdir(parents=True)
-    report = outdir / "amrfinder.tsv"
-    matched_nuc = outdir / "matched_nucleotide.fasta"
-    cmd = ["amrfinder", "-n", str(path), "-o", str(report),
-           "--nucleotide_output", str(matched_nuc)]
-    if organism and organism.strip():
-        cmd += ["-O", organism.strip()]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    if proc.returncode != 0:
-        return None, f"AMRFinderPlus failed for {sample_id}:\n{proc.stderr[-4000:]}"
-    raw = parse_amr_tsv(report)
-    norm = normalize(raw, sample_id)
-    nrec, seqlen, counts, gc = sequence_stats(path)
-    stats = {
-        "Sample ID": sample_id, "FASTA records": nrec, "Total bases": seqlen,
-        "A": counts["A"], "C": counts["C"], "G": counts["G"], "T": counts["T"],
-        "N": counts["N"], "GC %": round(gc, 2),
-        "AMR findings": len(norm)
+def fasta_stats(seq):
+    valid = "ACGTN"
+    seq = "".join(x for x in seq.upper() if x in valid)
+    if not seq:
+        raise ValueError("No valid nucleotide sequence found.")
+    n = len(seq)
+    return {
+        "length": n, "A": seq.count("A"), "C": seq.count("C"),
+        "G": seq.count("G"), "T": seq.count("T"), "N": seq.count("N"),
+        "GC": (seq.count("G") + seq.count("C")) / n * 100,
     }
-    return (norm, stats, matched_nuc, raw), ""
 
-def analyze(files, organism):
-    ok, ver = amrfinder_available()
-    if not ok:
-        return (
-            "❌ AMRFinderPlus is not available in this deployment. Deploy the included Dockerfile so the server installs AMRFinderPlus and its database.",
-            pd.DataFrame(), pd.DataFrame(), "", pd.DataFrame()
-        )
-    try:
-        root, paths = collect_fastas(files)
-    except Exception as e:
-        return f"❌ Upload error: {e}", pd.DataFrame(), pd.DataFrame(), "", pd.DataFrame()
-    if not paths:
-        return "❌ No FASTA files found. Upload FASTA/FA/FNA files or a ZIP containing them.", pd.DataFrame(), pd.DataFrame(), "", pd.DataFrame()
-    all_rows, stat_rows = [], []
-    errors = []
-    evidence_map = {}
-    for p in paths:
-        result, err = run_one(p, organism)
-        if err:
-            errors.append(err)
-            continue
-        norm, stats, matched_nuc, _ = result
-        evidence_map[stats["Sample ID"]] = str(matched_nuc)
-        all_rows.append(norm)
-        stat_rows.append(stats)
-    findings = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
-    stats = pd.DataFrame(stat_rows)
-    if findings.empty:
-        msg = f"✅ Analysis completed for {len(paths)} sample(s). No AMR-associated findings were reported by AMRFinderPlus."
+
+def sample_id_from_header(header, filename=""):
+    return (header.split()[0] if header else os.path.splitext(os.path.basename(filename))[0]).strip()
+
+
+def infer_organism(header, filename=""):
+    text = f"{header} {filename}".lower()
+    for key in sorted(ORGANISM_MAP, key=len, reverse=True):
+        if key in text:
+            return ORGANISM_MAP[key]
+    return "Not provided"
+
+
+def load_metadata(path):
+    if not path:
+        return {}
+    ext = os.path.splitext(str(path))[1].lower()
+    if ext == ".csv":
+        df = pd.read_csv(path, dtype=str).fillna("")
+    elif ext in {".xlsx", ".xls"}:
+        df = pd.read_excel(path, dtype=str).fillna("")
     else:
-        msg = f"✅ Analysis completed for {len(paths)} sample(s). {len(findings)} AMRFinderPlus finding(s) reported."
-    if errors:
-        msg += "\n\n⚠️ Some files failed:\n" + "\n\n".join(errors)
-    global EVIDENCE
-    EVIDENCE = evidence_map
-    return msg, findings, stats, ver, findings
+        raise ValueError("Metadata must be CSV or Excel.")
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    sid_col = next((cols[k] for k in ["sample id", "sample_id", "sample", "id"] if k in cols), None)
+    org_col = next((cols[k] for k in ["organism", "organism name", "species"] if k in cols), None)
+    if not sid_col or not org_col:
+        raise ValueError("Metadata requires columns: Sample ID and Organism.")
+    return {clean(r[sid_col]): clean(r[org_col]) for _, r in df.iterrows() if clean(r[sid_col])}
 
-def explorer(query, findings):
-    if findings is None or len(findings) == 0:
-        return "Run genomic analysis first.", pd.DataFrame()
-    q = (query or "").strip().lower()
-    if not q:
-        return "Enter an antibiotic, antibiotic class, gene, or AMRFinderPlus term.", pd.DataFrame()
-    # This is deliberately a transparent text search over reported AMRFinderPlus annotations.
-    # It avoids inventing antibiotic relationships not present in the tool output.
-    cols = ["Class","Subclass","AMR determinant","Mechanism / Product","Reference","Raw result"]
-    mask = pd.Series(False, index=findings.index)
-    for c in cols:
-        if c in findings.columns:
-            mask |= findings[c].astype(str).str.lower().str.contains(re.escape(q), na=False)
-    hits = findings.loc[mask].copy()
-    if hits.empty:
-        return f"No AMRFinderPlus result contains '{query}'. Try an antibiotic class, gene/determinant, or term shown in the results.", hits
-    return f"Found {len(hits)} matching genomic finding(s) for '{query}'. These are AMRFinderPlus-associated findings, not phenotypic AST results.", hits
 
-def build_sequence_evidence(sample, determinant, files):
-    sample_id = clean_sample_id(sample or "")
-    path = EVIDENCE.get(sample_id)
-    if not path or not Path(path).exists():
-        return "Run genomic analysis first, then enter the exact Sample ID from the results."
-    records = read_fasta_records(Path(path))
+def run_amrfinder(path, organism=None):
+    cmd = ["amrfinder", "-n", path]
+    if organism and organism != "Not provided":
+        # AMRFinderPlus expects its supported organism name; do not guess it from arbitrary text.
+        normalized = organism.strip().replace(" ", "_")
+        cmd += ["-O", normalized]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except FileNotFoundError:
+        return False, "AMRFinderPlus was not found on this server."
+    except subprocess.TimeoutExpired:
+        return False, "AMRFinderPlus analysis timed out after 300 seconds."
+    except Exception as e:
+        return False, f"AMRFinderPlus execution error: {e}"
+    if p.returncode != 0:
+        return False, p.stderr.strip() or "AMRFinderPlus returned a non-zero exit code."
+    return True, p.stdout.strip()
+
+
+def parse_amrfinder_tsv(raw, sample_id, organism):
+    """Parse the real AMRFinderPlus tabular output, preserving the complete raw line."""
+    if not raw or not raw.strip():
+        return pd.DataFrame(columns=DETAIL_COLUMNS)
+    lines = [x for x in raw.splitlines() if x.strip()]
+    # AMRFinderPlus writes a header line beginning with '#'. Remove the comment marker only for parsing.
+    header_idx = next((i for i, x in enumerate(lines) if x.startswith("#") and "Element symbol" in x), None)
+    if header_idx is None:
+        # Some versions emit the header without #.
+        header_idx = next((i for i, x in enumerate(lines) if "Element symbol" in x and "Class" in x), None)
+    if header_idx is None:
+        return pd.DataFrame(columns=DETAIL_COLUMNS)
+
+    header = lines[header_idx].lstrip("#").strip().split("\t")
+    data_lines = lines[header_idx + 1:]
+    data_lines = [x for x in data_lines if not x.startswith("#")]
+    if not data_lines:
+        return pd.DataFrame(columns=DETAIL_COLUMNS)
+
+    rows = []
+    for line in data_lines:
+        vals = line.split("\t")
+        if len(vals) < len(header):
+            vals += [""] * (len(header) - len(vals))
+        row = {header[i].strip(): clean(vals[i]) for i in range(len(header))}
+        row["_raw"] = line
+        rows.append(row)
+
+    def first(row, *names):
+        for name in names:
+            if clean(row.get(name, "")):
+                return clean(row.get(name))
+        return ""
+
+    out = []
+    for r in rows:
+        gene = first(r, "Element symbol", "Gene symbol")
+        elem_name = first(r, "Element name", "Sequence name")
+        cls = first(r, "Class")
+        subclass = first(r, "Subclass")
+        method = first(r, "Method")
+        ident = first(r, "% Identity to reference", "% Identity")
+        cov = first(r, "% Coverage of reference", "% Coverage")
+        contig = first(r, "Contig id", "Sequence / Contig")
+        start = first(r, "Start")
+        stop = first(r, "Stop")
+        ref_acc = first(r, "Closest reference accession", "Reference accession")
+        ref_name = first(r, "Closest reference name", "Name of closest sequence")
+        reference = " — ".join([x for x in [ref_acc, ref_name] if x])
+        mechanism = first(r, "Element name", "Sequence name", "HMM description")
+        out.append({
+            "Sample ID": sample_id,
+            "Organism": organism,
+            "AMR determinant": gene,
+            "Sequence / Element name": elem_name,
+            "Class": cls,
+            "Subclass": subclass,
+            "Mechanism / Product": mechanism,
+            "Method": method,
+            "Identity (%)": ident,
+            "Coverage (%)": cov,
+            "Contig": contig,
+            "Start": start,
+            "Stop": stop,
+            "Reference": reference,
+            "Raw result": r.get("_raw", ""),
+        })
+    return pd.DataFrame(out, columns=DETAIL_COLUMNS)
+
+
+def analyze_one(path, metadata=None):
+    metadata = metadata or {}
+    records = read_fasta_records(path)
+    all_details = []
+    summaries = []
     if not records:
-        return "AMRFinderPlus did not return a matched nucleotide sequence for this finding."
-    text = "\n".join(f">{h}\n{s}" for h, s in records)
-    return (
-        f"### {sample} — AMRFinderPlus matched nucleotide evidence\n\n"
-        f"**Requested determinant:** {determinant or 'not specified'}\n\n"
-        "The sequence below comes from AMRFinderPlus `--nucleotide_output`. "
-        "It is not a fabricated sequence or a sequence reconstructed from the gene name.\n\n"
-        "```text\n" + text[:20000] + "\n```"
-    )
+        raise ValueError("The FASTA file contains no records.")
+    for header, seq in records:
+        sid = sample_id_from_header(header, path)
+        organism = metadata.get(sid) or infer_organism(header, path)
+        stats = fasta_stats(seq)
+        # Write this record to a temporary FASTA so multi-record files are handled one sample at a time.
+        with tempfile.NamedTemporaryFile("w", suffix=".fasta", delete=False, encoding="utf-8") as tmp:
+            tmp.write(f">{header}\n{seq}\n")
+            tmp_path = tmp.name
+        try:
+            success, raw = run_amrfinder(tmp_path)
+        finally:
+            try: os.unlink(tmp_path)
+            except OSError: pass
+        details = parse_amrfinder_tsv(raw if success else "", sid, organism)
+        if not details.empty:
+            all_details.append(details)
+        determinants = ", ".join(dict.fromkeys(details["AMR determinant"].tolist())) if not details.empty else ""
+        targets = ", ".join(dict.fromkeys(details["Subclass"].replace("", pd.NA).dropna().tolist())) if not details.empty else ""
+        summaries.append({
+            "Sample ID": sid, "Organism": organism,
+            "Sequence length": stats["length"], "GC (%)": f'{stats["GC"]:.2f}',
+            "AMR status": "AMR determinant(s) detected" if determinants else ("No known AMR determinant reported" if success else "Analysis failed"),
+            "AMR determinants": determinants,
+            "Resistance targets": targets,
+            "Analysis message": "" if success else raw,
+        })
+    detail_df = pd.concat(all_details, ignore_index=True) if all_details else pd.DataFrame(columns=DETAIL_COLUMNS)
+    return pd.DataFrame(summaries), detail_df
 
-def load_demo():
-    return None
 
-css = """
-body {background: #f7fafc;}
-.gradio-container {max-width: 1250px !important;}
-.hero {padding: 26px; border-radius: 20px; background: linear-gradient(135deg,#0f172a,#164e63); color:white; margin-bottom:18px;}
-.hero h1 {font-size: 42px; margin:0 0 8px;}
-.hero p {font-size:17px; opacity:.92;}
+def batch_analyze(zip_path, metadata_path=None):
+    if not zip_path:
+        return pd.DataFrame(), pd.DataFrame(), "Upload a ZIP containing FASTA files."
+    metadata = load_metadata(metadata_path) if metadata_path else {}
+    work = tempfile.mkdtemp(prefix="amriva_")
+    try:
+        with zipfile.ZipFile(zip_path, "r") as z:
+            members = [m for m in z.infolist() if not m.is_dir() and m.filename.lower().endswith((".fa", ".fasta", ".fna"))]
+            if not members:
+                return pd.DataFrame(), pd.DataFrame(), "No FASTA files were found in the ZIP."
+            summaries, details = [], []
+            for i, m in enumerate(members):
+                safe_name = os.path.basename(m.filename) or f"sample_{i}.fasta"
+                path = os.path.join(work, f"{i}_{safe_name}")
+                with z.open(m) as src, open(path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                try:
+                    s, d = analyze_one(path, metadata)
+                    summaries.append(s)
+                    if not d.empty:
+                        details.append(d)
+                except Exception as e:
+                    summaries.append(pd.DataFrame([{
+                        "Sample ID": os.path.splitext(safe_name)[0], "Organism": metadata.get(os.path.splitext(safe_name)[0], "Not provided"),
+                        "Sequence length": "", "GC (%)": "", "AMR status": "Analysis failed",
+                        "AMR determinants": "", "Resistance targets": "", "Analysis message": str(e)
+                    }]))
+            summary = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
+            detail = pd.concat(details, ignore_index=True) if details else pd.DataFrame(columns=DETAIL_COLUMNS)
+            return summary, detail, f"Analysis completed for {len(summary)} sample record(s)."
+    except zipfile.BadZipFile:
+        return pd.DataFrame(), pd.DataFrame(), "The uploaded file is not a valid ZIP archive."
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def search_explorer(details, query):
+    if not isinstance(details, pd.DataFrame) or details.empty:
+        return pd.DataFrame(columns=DETAIL_COLUMNS), "No AMRFinderPlus findings are available yet. Upload and analyze samples first."
+    q = clean(query).lower()
+    if not q:
+        return details.copy(), f"Showing all {len(details)} AMRFinderPlus finding(s)."
+    searchable = ["Class", "Subclass", "AMR determinant", "Sequence / Element name", "Mechanism / Product", "Reference", "Organism", "Sample ID"]
+    mask = pd.Series(False, index=details.index)
+    for col in searchable:
+        mask = mask | details[col].astype(str).str.lower().str.contains(q, regex=False, na=False)
+    result = details.loc[mask].copy()
+    if result.empty:
+        msg = (f'No exact text match for "{query}". AMRFinderPlus may classify the target at a broader class/subclass level. '
+               "Try a class/subclass such as BETA-LACTAM or CEPHALOSPORIN.")
+    else:
+        msg = f'Explorer found {len(result)} finding(s) matching "{query}".'
+    return result, msg
+
+
+def organism_profile(details, sample_id):
+    if not isinstance(details, pd.DataFrame) or details.empty:
+        return pd.DataFrame(columns=DETAIL_COLUMNS), "No findings available."
+    sid = clean(sample_id)
+    if not sid:
+        return details.copy(), "Select a sample to see its resistance-associated genomic profile."
+    out = details[details["Sample ID"].astype(str) == sid].copy()
+    return out, f"{sid}: {len(out)} AMRFinderPlus finding(s)."
+
+
+def explorer_choices(details):
+    if not isinstance(details, pd.DataFrame) or details.empty:
+        return gr.update(choices=[], value=None)
+    vals = []
+    for col in ["Subclass", "Class"]:
+        for x in details[col].astype(str):
+            x = clean(x)
+            if x and x not in vals:
+                vals.append(x)
+    return gr.update(choices=vals, value=(vals[0] if vals else None))
+
+
+def sample_choices(details):
+    if not isinstance(details, pd.DataFrame) or details.empty:
+        return gr.update(choices=[], value=None)
+    vals = list(dict.fromkeys([clean(x) for x in details["Sample ID"].astype(str) if clean(x)]))
+    return gr.update(choices=vals, value=(vals[0] if vals else None))
+
+
+def run_single(path, metadata_path):
+    if not path:
+        return "Please upload a FASTA file.", pd.DataFrame(columns=DETAIL_COLUMNS), pd.DataFrame(columns=DETAIL_COLUMNS), gr.update(choices=[], value=None)
+    try:
+        metadata = load_metadata(metadata_path) if metadata_path else {}
+        summary, details = analyze_one(path, metadata)
+        message = f"✅ {len(summary)} FASTA record(s) analyzed. {len(details)} AMRFinderPlus finding(s) reported."
+        return message, details, details, sample_choices(details)
+    except Exception as e:
+        return f"❌ Analysis failed: {e}", pd.DataFrame(columns=DETAIL_COLUMNS), pd.DataFrame(columns=DETAIL_COLUMNS), gr.update(choices=[], value=None)
+
+
+def run_batch(zip_path, metadata_path):
+    summary, details, msg = batch_analyze(zip_path, metadata_path)
+    return msg, summary, details, details, sample_choices(details)
+
+HOME = """# 🧬 AMRIVA\n## Genomic AMR Research Workspace\n\n### The problem we solve\nA researcher may have **100 isolates** and AMRFinderPlus findings spread across many results. AMRIVA organizes those findings around two practical questions:\n\n**Organism → What resistance-associated determinants were detected in this organism?**\n\n**Resistance target → Which samples/organisms have a matching AMRFinderPlus finding, which determinant was detected, and where is it located?**\n\n### Workflow\n**FASTA → AMRFinderPlus → structured genomic findings → Organism Profile / Resistance Explorer → sequence location & reference evidence → further laboratory validation**\n\nAMRIVA is a research/educational interface around AMRFinderPlus. It does not replace AMRFinderPlus or phenotypic AST."""
+
+ABOUT = """## What makes the explorer useful?\n\nAMRIVA does not invent resistance calls. It uses the actual AMRFinderPlus output and reorganizes it into a searchable workspace.\n\nFor each finding you can see:\n- sample ID\n- organism (from uploaded metadata or FASTA header; never guessed from a gene)\n- AMR determinant\n- resistance class/subclass reported by AMRFinderPlus\n- method\n- identity and coverage\n- contig and genomic start/stop\n- closest reference\n- original raw AMRFinderPlus result\n\n**Important:** AMRFinderPlus `Subclass` can provide a more specific antibiotic or antibiotic-class association. A class/subclass annotation is not automatically proof of phenotypic resistance to every individual drug in that class. Phenotypic AST remains separate confirmation.\n"""
+
+AMRIVA_CSS = """
+.gradio-container{max-width:1450px!important;margin:auto!important}
+#hero{padding:34px;border-radius:24px;margin-bottom:20px;background:linear-gradient(135deg,#123c69,#0f766e);color:white}
+#hero h1{font-size:48px!important;margin:0!important}
 """
 
-with gr.Blocks(css=css, title="AMRIVA — Genomic AMR Explorer") as demo:
-    findings_state = gr.State(pd.DataFrame())
-    files_state = gr.State([])
+with gr.Blocks(title=APP_NAME) as demo:
+    detail_state = gr.State(pd.DataFrame(columns=DETAIL_COLUMNS))
+    gr.HTML("<div id='hero'><h1>🧬 AMRIVA</h1><p>Genomic AMR Research Workspace</p><p>AMRFinderPlus-powered analysis • Organism profiles • Resistance Explorer</p></div>")
+    with gr.Tabs():
+        with gr.Tab("🏠 Home"):
+            gr.Markdown(HOME)
+        with gr.Tab("🧬 Genomic Analysis"):
+            gr.Markdown("## Genomic Analysis\nUpload FASTA. AMRFinderPlus performs the genomic screening; AMRIVA structures the returned fields into a readable evidence table.")
+            with gr.Row():
+                fasta = gr.File(label="FASTA / FNA", file_types=[".fa", ".fasta", ".fna"], type="filepath")
+                metadata = gr.File(label="Optional organism metadata (CSV/XLSX)", file_types=[".csv", ".xlsx", ".xls"], type="filepath")
+            gr.Markdown("**Metadata format:** `Sample ID, Organism`. If organism information is not supplied, AMRIVA shows **Not provided** rather than inventing a species.")
+            run = gr.Button("🧬 Run AMRFinderPlus", variant="primary")
+            status = gr.Markdown()
+            results = gr.Dataframe(headers=DETAIL_COLUMNS, datatype=["str"] * len(DETAIL_COLUMNS), interactive=False, wrap=True, label="Structured AMRFinderPlus Findings")
+            gr.Markdown("### What the table means")
+            gr.Markdown("**AMR determinant** = detected genetic element; **Class/Subclass** = AMRFinderPlus resistance target classification; **Identity/Coverage** = sequence-reference evidence; **Contig + Start/Stop** = genomic location; **Reference** = closest reference evidence; **Raw result** = original AMRFinderPlus row.")
+        with gr.Tab("📁 Batch Analysis"):
+            gr.Markdown("## Analyze many isolates\nUpload one ZIP containing any number of `.fa`, `.fasta` or `.fna` files. Optional metadata connects Sample IDs to organism names.")
+            with gr.Row():
+                batch_zip = gr.File(label="ZIP of FASTA files", file_types=[".zip"], type="filepath")
+                batch_meta = gr.File(label="Optional Sample ID → Organism CSV/XLSX", file_types=[".csv", ".xlsx", ".xls"], type="filepath")
+            batch_run = gr.Button("📊 Analyze All Samples", variant="primary")
+            batch_status = gr.Markdown()
+            batch_summary = gr.Dataframe(interactive=False, wrap=True, label="Sample overview")
+            batch_detail = gr.Dataframe(headers=DETAIL_COLUMNS, datatype=["str"] * len(DETAIL_COLUMNS), interactive=False, wrap=True, label="All AMRFinderPlus Findings")
+        with gr.Tab("🔎 Resistance Explorer"):
+            gr.Markdown("## Resistance Explorer\nSearch the complete uploaded dataset by **antibiotic/resistance target, class, subclass, gene, organism or sample**.")
+            query = gr.Textbox(label="Search resistance target / antibiotic / class / subclass / gene", placeholder="e.g. BETA-LACTAM, CEPHALOSPORIN, blaTEM")
+            search_btn = gr.Button("🔎 Explore", variant="primary")
+            explorer_msg = gr.Markdown()
+            explorer = gr.Dataframe(headers=DETAIL_COLUMNS, datatype=["str"] * len(DETAIL_COLUMNS), interactive=False, wrap=True, label="Matching samples, organisms, genes and genomic locations")
+            gr.Markdown("**Note:** If you search an individual antibiotic such as `penicillin` but AMRFinderPlus reports only a broader class such as `BETA-LACTAM`, AMRIVA will not silently convert the broad class into a drug-specific resistance claim. Search the reported class/subclass or use the AMRFinderPlus-supported annotation.")
+        with gr.Tab("🧫 Organism Profile"):
+            gr.Markdown("## Organism / Sample Resistance Profile\nSee all AMRFinderPlus resistance-associated findings detected in one sample.")
+            sample_drop = gr.Dropdown(label="Sample ID", choices=[])
+            profile_btn = gr.Button("View Profile", variant="primary")
+            profile_msg = gr.Markdown()
+            profile = gr.Dataframe(headers=DETAIL_COLUMNS, datatype=["str"] * len(DETAIL_COLUMNS), interactive=False, wrap=True, label="Complete genomic profile")
+        with gr.Tab("ℹ️ About"):
+            gr.Markdown(ABOUT)
 
-    gr.HTML("""
-    <div class="hero">
-      <h1>🧬 AMRIVA</h1>
-      <p>Genomic Antimicrobial Resistance Explorer</p>
-      <p>Run NCBI AMRFinderPlus on assembled nucleotide sequences, then explore resistance-associated genomic findings across samples and organisms.</p>
-    </div>
-    """)
-
-    with gr.Tab("Home"):
-        gr.Markdown("""
-### Why AMRIVA?
-
-AMRIVA is a research and learning interface built around **NCBI AMRFinderPlus**. It does not replace the underlying detection engine. Instead, it provides a focused workflow for analyzing multiple genomic samples and exploring the resulting resistance-associated determinants.
-
-**Workflow**
-
-`FASTA / ZIP → AMRFinderPlus → genomic findings → antibiotic/class exploration → sequence evidence`
-
-**Important:** a genomic finding is not the same as phenotypic susceptibility. AMRIVA does not provide clinical diagnosis or AST interpretation.
-        """)
-
-    with gr.Tab("Genomic Analysis"):
-        gr.Markdown("### Upload genomic samples")
-        uploads = gr.File(file_count="multiple", file_types=[".fasta",".fa",".fna",".fas",".zip"], label="FASTA files or ZIP of FASTA files")
-        organism = gr.Textbox(label="Optional organism for AMRFinderPlus mutation screening", placeholder="e.g. Escherichia coli")
-        analyze_btn = gr.Button("🔬 Run AMRFinderPlus Analysis", variant="primary")
-        status = gr.Markdown()
-        summary = gr.Dataframe(label="Sample statistics", interactive=False)
-        results = gr.Dataframe(label="AMRFinderPlus findings", interactive=False, wrap=True)
-        version = gr.Textbox(label="AMRFinderPlus runtime information", interactive=False)
-        analyze_btn.click(analyze, [uploads, organism], [status, results, summary, version, findings_state])
-
-        gr.Markdown("""
-### What the results mean
-
-The findings table is built from the **actual AMRFinderPlus TSV output**. Columns such as identity, coverage, method, coordinates and reference are shown only when AMRFinderPlus provides corresponding fields.
-
-The uploaded nucleotide sequence is the genomic input; AMRFinderPlus is responsible for detecting AMR-associated genes and supported resistance-associated point mutations.
-        """)
-
-    with gr.Tab("Antibiotic Explorer"):
-        gr.Markdown("""
-### ⭐ Explore genomic findings by antibiotic/class
-
-Enter a term such as an antibiotic class, gene/determinant, or another term that appears in the AMRFinderPlus annotation.
-
-**Example research question:**  
-*Which samples and organisms in my dataset have genomic findings associated with β-lactam resistance, and which determinants were detected?*
-
-The explorer searches the reported AMRFinderPlus annotations. It does **not** infer phenotypic resistance from the genome.
-        """)
-        query = gr.Textbox(label="Search antibiotic / class / determinant", placeholder="e.g. beta-lactam, fluoroquinolone, blaTEM")
-        explore = gr.Button("Explore")
-        explore_status = gr.Markdown()
-        explore_table = gr.Dataframe(interactive=False, wrap=True)
-        explore.click(explorer, [query, findings_state], [explore_status, explore_table])
-
-        gr.Markdown("### Finding details")
-        sample = gr.Textbox(label="Sample ID")
-        determinant = gr.Textbox(label="AMR determinant")
-        evidence = gr.Markdown()
-        evidence_btn = gr.Button("View uploaded sequence context")
-        evidence_btn.click(build_sequence_evidence, [sample, determinant, uploads], evidence)
-
+    run.click(run_single, [fasta, metadata], [status, results, detail_state, sample_drop])
+    batch_run.click(run_batch, [batch_zip, batch_meta], [batch_status, batch_summary, batch_detail, detail_state, sample_drop])
+    search_btn.click(search_explorer, [detail_state, query], [explorer_msg, explorer])
+    query.submit(search_explorer, [detail_state, query], [explorer_msg, explorer])
+    profile_btn.click(organism_profile, [detail_state, sample_drop], [profile, profile_msg])
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT","7860")))
+    demo.launch(theme=gr.themes.Soft(), css=AMRIVA_CSS)
