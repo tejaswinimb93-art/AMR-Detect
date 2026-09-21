@@ -17,6 +17,6 @@ RUN /opt/conda/bin/amrfinder -u
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER app/ .
 
-EXPOSE 7860
+EXPOSE 10000
 
-CMD ["/opt/conda/bin/python", "app.py"]
+CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=10000"]
