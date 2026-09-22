@@ -104,7 +104,7 @@ def sample_id_from_header(header, fallback):
     # Prefer explicit sample identifiers in common header forms.
     patterns = [
         r"(?:sample[_\s-]*id|sample)[=:]([A-Za-z0-9_.-]+)",
-        r"^([A-Za-z0-9_.-]+)"
+        r"(?:target[_\s-]*acc|target)[=:]([A-Za-z0-9_.-]+)",
     ]
     for p in patterns:
         m = re.search(p, header, flags=re.I)
@@ -132,7 +132,10 @@ def parse_fasta_files(files):
         for i, (header, seq) in enumerate(records, start=1):
             sid = sample_id_from_header(header, Path(f.name).stem)
             contig_match = re.search(r"(?:contig|sequence|seq)[=:]([^|;\s]+)", header, flags=re.I)
-            contig = contig_match.group(1) if contig_match else (header.split()[0] if header else f"record_{i}")
+            # MicroBIGG-E/NCBI-style FASTA headers may use the first token as
+            # the contig accession and carry sample/organism metadata after |.
+            # Use that first token when no explicit contig= field exists.
+            contig = contig_match.group(1) if contig_match else (header.split("|")[0].split()[0] if header else f"record_{i}")
             rows.append({
                 "Sample ID": sid,
                 "Organism": organism_from_header(header),
