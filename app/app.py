@@ -441,36 +441,35 @@ def standardize_amrfinder(df, fasta_df=None, metadata_df=None):
 
     # These aliases cover current AMRFinderPlus field names as well as
     # common AMRIVA/demo exports.
-    c_sample = find_col(df, "Sample ID", "Sample", "SampleID", "sample_name", "sample name", "isolate", "isolate_id", "target_acc", "biosample_acc")
-    c_org = find_col(df, "Organism", "Species", "Taxon")
+    c_sample = find_col(df, "Sample ID", "Sample", "SampleID", "sample_name", "sample name", "isolate", "isolate_id", "target_acc", "Target accession", "target accession", "biosample_acc", "BioSample", "biosample accession")
+    c_org = find_col(df, "Organism", "Scientific name", "scientific_name", "Taxonomy", "Taxon", "tax_name", "tax-name", "Scientific_name")
     c_det = find_col(
-        df, "Element symbol", "Gene symbol", "AMR determinant",
-        "determinant", "AMR gene", "Gene", "Element"
+        df, "Element symbol", "element_symbol", "elem_symbol", "Gene symbol", "AMR determinant",
+        "determinant", "AMR gene", "Gene", "Element", "element symbol"
     )
     c_class = find_col(df, "Class")
     c_sub = find_col(df, "Subclass", "Sub-class")
     c_mech = find_col(
-        df, "Mechanism", "Product", "Element name",
-        "Gene name", "Mechanism/Product"
+        df, "Mechanism", "Product", "Element name", "element_name", "Sequence name",
+        "Gene name", "Mechanism/Product", "Element description"
     )
-    c_method = find_col(df, "Method")
+    c_method = find_col(df, "Method", "amr_method", "AMR method")
     c_ident = find_col(
-        df, "% Identity to reference sequence",
-        "% identity", "Identity", "Percent identity"
+        df, "% Identity to reference sequence", "% Identity to reference", "pct_ref_identity", "Percent identity",
+        "% identity", "Identity"
     )
     c_cov = find_col(
-        df, "% Coverage of reference sequence",
-        "% coverage", "Coverage", "Percent coverage"
+        df, "% Coverage of reference sequence", "% Coverage of reference", "pct_ref_coverage", "Percent coverage",
+        "% coverage", "Coverage"
     )
     c_contig = find_col(
-        df, "Contig id", "Contig", "Sequence name",
-        "Sequence ID", "Sequence", "Sequence/Contig"
+        df, "Contig id", "Contig", "contig_acc", "contig accession", "Sequence name",
+        "Sequence ID", "Sequence", "Sequence/Contig", "sequence accession"
     )
-    c_start = find_col(df, "Start", "Target start")
-    c_stop = find_col(df, "Stop", "Target stop")
+    c_start = find_col(df, "Start", "start_on_contig", "target start", "Target start")
+    c_stop = find_col(df, "Stop", "end_on_contig", "stop_on_contig", "target stop", "Target stop")
     c_ref_acc = find_col(
-        df, "Accession of closest sequence",
-        "Closest reference accession", "Reference accession", "Accession"
+        df, "Accession of closest sequence", "Closest reference accession", "closest_reference_acc", "closest-ref-accession", "Reference accession", "Accession"
     )
     c_ref_name = find_col(
         df, "Name of closest sequence",
