@@ -131,14 +131,121 @@ def parse_fasta_files(files):
         records = fasta_records(text)
         for i, (header, seq) in enumerate(records, start=1):
             sid = sample_id_from_header(header, Path(f.name).stem)
+            contig_match = re.search(r"(?:contig|sequence|seq)[=:]([^|;\s]+)", header, flags=re.I)
+            contig = contig_match.group(1) if contig_match else (header.split()[0] if header else f"record_{i}")
             rows.append({
                 "Sample ID": sid,
                 "Organism": organism_from_header(header),
-                "Sequence / Contig": header.split()[0] if header else f"record_{i}",
+                "Sequence / Contig": contig,
                 "_full_sequence": re.sub(r"\s+", "", seq).upper(),
                 "_header": header,
             })
     return pd.DataFrame(rows)
+
+
+def parse_metadata_files(files):
+    """Read optional NCBI Isolate Browser / metadata exports.
+    Only explicit metadata is used; AMRIVA never guesses an organism.
+    """
+    frames = []
+    for f in files or []:
+        try:
+            name = f.name.lower()
+            if name.endswith(".csv"):
+                frames.append(pd.read_csv(f, dtype=str, keep_default_na=False))
+            else:
+                frames.append(pd.read_csv(f, sep="\t", dtype=str, keep_default_na=False))
+        except Exception:
+            continue
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+def metadata_value(df, row, *aliases):
+    c = find_col(df, *aliases) if df is not None and not df.empty else None
+    return clean(row[c]) if c else ""
+
+def enrich_fasta_with_metadata(fasta_df, metadata_df):
+    if fasta_df is None or fasta_df.empty or metadata_df is None or metadata_df.empty:
+        return fasta_df
+
+    out = fasta_df.copy()
+    sample_col = find_col(metadata_df, "Sample ID", "sample_id", "sample", "isolate",
+                           "isolate_id", "sample name", "sample_name", "strain")
+    org_col = find_col(metadata_df, "Organism", "organism_name", "taxon_name",
+                       "species", "taxname", "taxgroup_name")
+    asm_col = find_col(metadata_df, "Assembly", "asm_acc", "assembly_accession",
+                       "assembly accession", "accession")
+    if not org_col:
+        return out
+
+    lookup = {}
+    for _, m in metadata_df.iterrows():
+        sid = clean(m[sample_col]) if sample_col else ""
+        asm = clean(m[asm_col]) if asm_col else ""
+        org = clean(m[org_col])
+        if org:
+            if sid:
+                lookup[("sample", sid.lower())] = org
+            if asm:
+                lookup[("assembly", asm.lower())] = org
+
+    for i, r in out.iterrows():
+        if clean(r.get("Organism")):
+            continue
+        sid = clean(r.get("Sample ID")).lower()
+        header = clean(r.get("_header")).lower()
+        seqname = clean(r.get("Sequence / Contig")).lower()
+        org = lookup.get(("sample", sid), "")
+        if not org:
+            for key, value in lookup.items():
+                if key[0] == "assembly" and key[1] and key[1] in header:
+                    org = value
+                    break
+        if org:
+            out.at[i, "Organism"] = org
+    return out
+
+def antibiotic_association(determinant, cls, subclass):
+    """Human-readable antibiotic groups associated with the detected determinant.
+    These are associations for exploration, not phenotype calls.
+    """
+    d = clean(determinant).lower()
+    exact = {
+        "blatem": "Penicillins / cephalosporins (beta-lactams)",
+        "blaoxa": "Beta-lactams",
+        "blapdc": "Cephalosporins (beta-lactams)",
+        "vang": "Vancomycin / glycopeptides",
+        "qnrs": "Fluoroquinolones",
+        "sul1": "Sulfonamides",
+        "teta": "Tetracyclines",
+        "aac(6')-ib": "Aminoglycosides",
+    }
+    if d in exact:
+        return exact[d]
+
+    c = clean(subclass or cls).lower()
+    if "beta-lactam" in c:
+        return "Beta-lactams"
+    if "glycopeptide" in c:
+        return "Glycopeptides"
+    if "quinolone" in c:
+        return "Fluoroquinolones"
+    if "aminoglycoside" in c:
+        return "Aminoglycosides"
+    if "tetracycline" in c:
+        return "Tetracyclines"
+    if "sulfonamide" in c:
+        return "Sulfonamides"
+    if "macrolide" in c:
+        return "Macrolides"
+    if "phenicol" in c:
+        return "Phenicol antibiotics"
+    if "trimethoprim" in c:
+        return "Trimethoprim"
+    return clean(subclass) or clean(cls) or "Not reported by AMRFinderPlus"
 
 def extract_nucleotide(row, fasta_map):
     contig = clean(row.get("Sequence / Contig", ""))
@@ -179,20 +286,18 @@ def reverse_complement(seq):
 
 def derive_antimicrobial(row):
     # AMRFinderPlus does not normally report a literal drug name for each hit.
-    # Therefore use an explicitly supplied drug first, otherwise report the
-    # resistance class/subclass as the antimicrobial association.
+    # Use an explicitly supplied drug first, otherwise use a transparent
+    # determinant/class association for exploration.
     for key in ["Antibiotic", "Drug", "Antimicrobial", "Antimicrobial(s)",
                 "Antibiotic / antimicrobial association"]:
         if key in row and clean(row[key]):
             return clean(row[key])
+    return antibiotic_association(
+        row.get("AMR determinant", ""),
+        row.get("Class", ""),
+        row.get("Subclass", ""),
+    )
 
-    subclass = clean(row.get("Subclass", ""))
-    cls = clean(row.get("Class", ""))
-    if subclass:
-        return f"Associated class: {subclass}"
-    if cls:
-        return f"Associated class: {cls}"
-    return "Not reported by AMRFinderPlus"
 
 def interpretation(row):
     det = clean(row.get("AMR determinant", ""))
@@ -326,7 +431,7 @@ def flatten_raw_results(df):
     return df
 
 
-def standardize_amrfinder(df, fasta_df=None):
+def standardize_amrfinder(df, fasta_df=None, metadata_df=None):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -336,7 +441,7 @@ def standardize_amrfinder(df, fasta_df=None):
 
     # These aliases cover current AMRFinderPlus field names as well as
     # common AMRIVA/demo exports.
-    c_sample = find_col(df, "Sample ID", "Sample", "SampleID", "name", "assembly")
+    c_sample = find_col(df, "Sample ID", "Sample", "SampleID", "sample_name", "sample name", "isolate", "isolate_id", "target_acc", "biosample_acc")
     c_org = find_col(df, "Organism", "Species", "Taxon")
     c_det = find_col(
         df, "Element symbol", "Gene symbol", "AMR determinant",
@@ -377,6 +482,9 @@ def standardize_amrfinder(df, fasta_df=None):
         "Antibiotic / antimicrobial association"
     )
 
+    if metadata_df is not None and not metadata_df.empty:
+        fasta_df = enrich_fasta_with_metadata(fasta_df, metadata_df)
+
     output = []
     fasta_map = {}
     if fasta_df is not None and not fasta_df.empty:
@@ -388,6 +496,16 @@ def standardize_amrfinder(df, fasta_df=None):
                 fasta_map[(sid, contig)] = seq
                 fasta_map.setdefault(("", contig), seq)
 
+    # If the AMRFinderPlus table has no sample column, map contigs to a
+    # FASTA-derived sample only when that contig belongs to exactly one sample.
+    contig_to_samples = {}
+    if fasta_df is not None and not fasta_df.empty:
+        for _, fr in fasta_df.iterrows():
+            ct = clean(fr.get("Sequence / Contig"))
+            sidf = clean(fr.get("Sample ID"))
+            if ct and sidf:
+                contig_to_samples.setdefault(ct, set()).add(sidf)
+
     for idx, r in df.iterrows():
         raw = " | ".join(
             f"{c}={clean(r[c])}" for c in df.columns if clean(r[c]) != ""
@@ -395,6 +513,12 @@ def standardize_amrfinder(df, fasta_df=None):
 
         sid = clean(r[c_sample]) if c_sample else ""
         org = clean(r[c_org]) if c_org else ""
+
+        if not sid and c_contig:
+            ct = clean(r[c_contig])
+            candidates = sorted(contig_to_samples.get(ct, set()))
+            if len(candidates) == 1:
+                sid = candidates[0]
 
         if not sid:
             sid = f"Sample_{idx + 1}"
@@ -551,6 +675,13 @@ if mode == "AMRFinderPlus result file":
         accept_multiple_files=True,
         key="optional_fasta",
     )
+    metadata_files = st.file_uploader(
+        "Optional NCBI isolate metadata CSV/TSV (for Sample ID + Organism)",
+        type=["csv", "tsv", "txt"],
+        accept_multiple_files=True,
+        key="ncbi_metadata",
+        help="Use this when the AMRFinderPlus TSV itself does not contain organism/sample metadata.",
+    )
     if st.button("Organize AMRFinderPlus results", type="primary"):
         if not uploaded_result:
             st.error("Upload an AMRFinderPlus TSV/CSV first.")
@@ -558,8 +689,9 @@ if mode == "AMRFinderPlus result file":
             try:
                 raw_df = read_table(uploaded_result)
                 fdf = parse_fasta_files(fasta_files) if fasta_files else pd.DataFrame()
+                mdf = parse_metadata_files(metadata_files) if metadata_files else pd.DataFrame()
                 st.session_state.fasta_df = fdf
-                st.session_state.results = standardize_amrfinder(raw_df, fdf)
+                st.session_state.results = standardize_amrfinder(raw_df, fdf, mdf)
                 st.success(f"Organized {len(st.session_state.results)} AMRFinderPlus record(s).")
             except Exception as e:
                 st.exception(e)
@@ -574,6 +706,11 @@ elif mode == "FASTA + AMRFinderPlus":
         "Upload the corresponding AMRFinderPlus TSV/CSV",
         type=["tsv", "txt", "csv"],
     )
+    metadata_files = st.file_uploader(
+        "Optional NCBI isolate metadata CSV/TSV",
+        type=["csv", "tsv", "txt"],
+        accept_multiple_files=True,
+    )
     if st.button("Process genomic results", type="primary"):
         if not fasta_files or not result_file:
             st.error("Upload both FASTA file(s) and the corresponding AMRFinderPlus result.")
@@ -581,8 +718,9 @@ elif mode == "FASTA + AMRFinderPlus":
             try:
                 fdf = parse_fasta_files(fasta_files)
                 rdf = read_table(result_file)
+                mdf = parse_metadata_files(metadata_files) if metadata_files else pd.DataFrame()
                 st.session_state.fasta_df = fdf
-                st.session_state.results = standardize_amrfinder(rdf, fdf)
+                st.session_state.results = standardize_amrfinder(rdf, fdf, mdf)
                 st.success(f"Processed {len(st.session_state.results)} genomic finding(s).")
             except Exception as e:
                 st.exception(e)
@@ -653,7 +791,7 @@ with tabs[1]:
         st.metric("AMRFinderPlus findings", len(results))
         st.caption(
             "Fields are mapped from AMRFinderPlus output. "
-            "Organism requires metadata, and nucleotide sequence extraction "
+            "Organism can come from explicit NCBI metadata or FASTA metadata, and nucleotide sequence extraction "
             "requires the corresponding FASTA file. 'Not reported' means the "
             "source file did not contain that field; AMRIVA does not invent values."
         )
@@ -671,38 +809,86 @@ with tabs[2]:
     if results.empty:
         st.info("Upload and organize results first.")
     else:
+        st.caption("Use an antibiotic/group filter to see which samples contain associated genomic AMR determinants. This is a genomic association view, not an AST phenotype call.")
+        col1, col2, col3 = st.columns(3)
+        antibiotic_options = sorted([x for x in results["Antibiotic / antimicrobial association"].astype(str).unique() if x.strip()])
+        class_options = sorted([x for x in results["Class"].astype(str).unique() if x.strip()])
+        organism_options = sorted([x for x in results["Organism"].astype(str).unique() if x.strip() and "Not provided" not in x])
+
+        with col1:
+            selected_antibiotic = st.selectbox("Antibiotic / group", ["All"] + antibiotic_options)
+        with col2:
+            selected_class = st.selectbox("AMR class", ["All"] + class_options)
+        with col3:
+            selected_organism = st.selectbox("Organism", ["All"] + organism_options)
+
         search_text = st.text_input(
-            "Search antimicrobial, class, subclass, determinant or mechanism",
-            placeholder="e.g. penicillin, beta-lactam, blaTEM",
+            "Search determinant, mechanism, sample ID or contig",
+            placeholder="e.g. blaTEM, Sample_001",
         )
+
+        filtered = results.copy()
+        if selected_antibiotic != "All":
+            filtered = filtered[filtered["Antibiotic / antimicrobial association"] == selected_antibiotic]
+        if selected_class != "All":
+            filtered = filtered[filtered["Class"] == selected_class]
+        if selected_organism != "All":
+            filtered = filtered[filtered["Organism"] == selected_organism]
         if search_text.strip():
             q = search_text.strip().lower()
-            mask = results.apply(
+            mask = filtered.apply(
                 lambda row: row.astype(str).str.lower().str.contains(q, regex=False).any(),
                 axis=1,
             )
-            filtered = results[mask]
-        else:
-            filtered = results
+            filtered = filtered[mask]
 
-        st.write(f"**{len(filtered)} matching finding(s)**")
+        st.write(f"**{len(filtered)} matching genomic finding(s)**")
+        if not filtered.empty:
+            sample_list = sorted(set(filtered["Sample ID"].astype(str)))
+            st.info("Samples in this result: " + ", ".join(sample_list))
         st.dataframe(filtered, use_container_width=True, hide_index=True)
+
 
 with tabs[3]:
     st.header("Cross-Sample Comparison")
     if results.empty:
         st.info("Upload and organize results first.")
     else:
-        choices = sorted([
-            x for x in results["Class"].dropna().astype(str).unique()
-            if x.strip()
-        ])
-        selected = st.selectbox("Filter by AMR class", ["All"] + choices)
-        view = results if selected == "All" else results[results["Class"] == selected]
+        st.caption("Filter across samples by antibiotic association, AMR class, organism, determinant and method.")
+        c1, c2, c3 = st.columns(3)
+        antibiotics = sorted([x for x in results["Antibiotic / antimicrobial association"].astype(str).unique() if x.strip()])
+        classes = sorted([x for x in results["Class"].astype(str).unique() if x.strip()])
+        organisms = sorted([x for x in results["Organism"].astype(str).unique() if x.strip() and "Not provided" not in x])
+        with c1:
+            fa = st.selectbox("Filter by antibiotic / group", ["All"] + antibiotics, key="cross_antibiotic")
+        with c2:
+            fc = st.selectbox("Filter by AMR class", ["All"] + classes, key="cross_class")
+        with c3:
+            fo = st.selectbox("Filter by organism", ["All"] + organisms, key="cross_organism")
+
+        c4, c5 = st.columns(2)
+        determinants = sorted([x for x in results["AMR determinant"].astype(str).unique() if x.strip() and x != "Not reported"])
+        methods = sorted([x for x in results["Method"].astype(str).unique() if x.strip() and x != "Not reported"])
+        with c4:
+            fd = st.selectbox("Filter by determinant", ["All"] + determinants, key="cross_det")
+        with c5:
+            fm = st.selectbox("Filter by method", ["All"] + methods, key="cross_method")
+
+        view = results.copy()
+        if fa != "All":
+            view = view[view["Antibiotic / antimicrobial association"] == fa]
+        if fc != "All":
+            view = view[view["Class"] == fc]
+        if fo != "All":
+            view = view[view["Organism"] == fo]
+        if fd != "All":
+            view = view[view["AMR determinant"] == fd]
+        if fm != "All":
+            view = view[view["Method"] == fm]
 
         summary = (
             view.groupby(
-                ["AMR determinant", "Class", "Subclass"],
+                ["Antibiotic / antimicrobial association", "AMR determinant", "Class", "Subclass"],
                 dropna=False
             )
             .agg(
@@ -715,7 +901,9 @@ with tabs[3]:
             .reset_index()
             .sort_values("Count", ascending=False)
         )
+        st.write(f"**{len(view)} genomic finding(s) across {view['Sample ID'].nunique()} sample(s)**")
         st.dataframe(summary, use_container_width=True, hide_index=True)
+
 
 with tabs[4]:
     st.header("Sample / Organism Profile")
