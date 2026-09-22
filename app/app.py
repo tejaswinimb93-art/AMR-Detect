@@ -499,8 +499,10 @@ def standardize_amrfinder(df, fasta_df=None):
             "Raw Result": raw,
         }
 
-        # Do not invent an organism. If FASTA metadata contains it, use that.
-        if not org and fasta_df is not None and not fasta_df.empty:
+        # Prefer explicit organism metadata from the corresponding FASTA.
+        # This also fixes demo/result files where the Organism field incorrectly
+        # contains the Sample ID (for example, SMP006).
+        if fasta_df is not None and not fasta_df.empty:
             matches = fasta_df[
                 fasta_df["Sample ID"].astype(str) == sid
             ]
@@ -771,7 +773,7 @@ with tabs[3]:
         with c2:
             selected_sub = st.selectbox("Subclass / antibiotic group", ["All"] + sub_choices + [x for x in drug_choices if x not in sub_choices])
         with c3:
-            selected_org = st.selectbox("Organism", ["All"] + org_choices)
+            selected_org = st.selectbox("Organism", ["All"] + org_choices, key="cross_sample_organism")
         with c4:
             determinant_query = st.text_input("AMR determinant", placeholder="e.g. blaTEM")
 
